@@ -130,14 +130,3 @@ def test_large_per_minute_file_is_streamed():
     if j["state"] == "error":   # without the static well files the input check must explain what is missing
         assert "Input check failed" in j["error"] or "Processing failed" in j["error"]
 
-
-def test_public_copy_matches_static():
-    """Vercel serves public/ from the CDN: it must be an exact copy of web_app/static."""
-    import filecmp
-    pub = ROOT / "public"
-    if not pub.exists():
-        pytest.skip("no public/ folder")
-    for f in (ROOT / "web_app/static").rglob("*"):
-        if f.is_file():
-            assert filecmp.cmp(f, pub / "static" / f.relative_to(ROOT / "web_app/static"), shallow=False), f
-    assert filecmp.cmp(ROOT / "web_app/static/index.html", pub / "index.html", shallow=False)

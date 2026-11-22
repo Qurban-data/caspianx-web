@@ -1,0 +1,11 @@
+# Vercel Container runtime (selected automatically because this file exists). Same app and model as Dockerfile.
+FROM python:3.11-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 CASPIANX_SYNC_UPLOAD=1
+WORKDIR /app
+COPY web_app/requirements.txt web_app/requirements.txt
+RUN pip install --no-cache-dir -r web_app/requirements.txt
+COPY core/ core/
+COPY templates/ templates/
+COPY web_app/ web_app/
+EXPOSE 80
+CMD ["sh", "-c", "uvicorn web_app.main:app --host 0.0.0.0 --port ${PORT:-80}"]

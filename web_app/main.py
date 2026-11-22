@@ -30,6 +30,7 @@ import pandas as pd
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 
 BASE = Path(__file__).resolve().parent
 ROOT = BASE.parent
@@ -50,6 +51,7 @@ MAX_SESSIONS = 8
 
 app = FastAPI(title="CaspianX Well Intelligence", version="5.0", docs_url="/api/docs", redoc_url=None)
 app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
+app.add_middleware(GZipMiddleware, minimum_size=1024)   # plotly.min.js 4.8 MB -> ~1.5 MB on the wire
 
 _MODEL = None
 _LOCK = threading.Lock()
