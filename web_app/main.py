@@ -351,7 +351,12 @@ def _job(jid: str, folder: Path, names: list[str]) -> None:
         res = run_pipeline(files, "uploaded files: " + ", ".join(names)[:200], step, str(folder))
         J.update(state="done", stage="done", result=res)
     except AP.InputError as ex:
-        J.update(state="error", error=f"Input check failed: {ex}")
+        msg = str(ex)
+        if "daily_features" in msg:
+            # most common mistake: a result file (vfm_submission / pta_submission) uploaded instead of sensor data
+            msg = ("these files contain no daily sensor data (daily_features: well, date, WHP, choke, ...). "
+                   "Result files such as vfm_submission.csv or pta_submission.csv cannot be used as input.")
+        J.update(state="error", error=f"Input check failed: {msg}")
         shutil.rmtree(folder, ignore_errors=True)
     except MemoryError:
         J.update(state="error", error="The server ran out of memory while processing the upload. Close other programs "

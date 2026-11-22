@@ -203,7 +203,10 @@ function uploadXHR(files, quiet) {
 async function upload(files) {
   if (!files || !files.length) return;
   try { const keep = Array.from(files); const res = await uploadJob(keep); S.source = { kind: "files", files: keep }; await apply(res); }
-  catch (e) { progress(null); progress(null, e.message, true); toast(e.message); }
+  catch (e) { progress(null);
+    // a failed upload never replaces the data already on screen: say so next to the error
+    const kept = S.sid ? " " + T("The data already loaded is kept.") : "";
+    progress(null, T(e.message) + kept, true); toast(T(e.message) + kept); }
 }
 async function loadField(code) {
   const fd = new FormData(); fd.append("code", code || "");
