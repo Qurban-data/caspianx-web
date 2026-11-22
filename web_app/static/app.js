@@ -149,7 +149,7 @@ async function apply(j) {
   const [m, p, it] = await Promise.all([S.model || api("/api/model"), api(`/api/pta?sid=${S.sid}`), api(`/api/interpret?sid=${S.sid}`)]);
   S.model = m; S.pta = p.events; S.interp = it;
   progress(null, `${j.dataset_kind === "DEMO" ? "Demo" : "Field data"} loaded · ${j.wells.length} wells · ${j.n_buildups} build-ups`);
-  await Promise.all([overview(), measurements(), vfm(), monthly()]);
+  await Promise.all([overview(), measurements(), vfm(), monthly(), proof()]);
   pta();
 }
 function header() {
@@ -290,6 +290,102 @@ function drawSurface() {
         camera: { eye: { x: -1.55, y: -1.6, z: 0.85 } }, aspectratio: { x: 1.7, y: 1, z: 0.7 } } }, CFG);
 }
 
+// ------------------------------------------------------------------ model proof
+const PHN = () => ({ oil: T("Oil"), water: T("Water"), gas: T("Gas") });
+const MNAME = { physics: "Pure physics", ml_ridge: "Pure ML · Ridge", ml_gbdt: "Pure ML · boosted trees", hybrid: "Hybrid (submitted)" };
+async function proof() {
+  const d = S.proof || (S.proof = await api("/api/model-proof"));
+  if (!d.available) { $("#proofCards").innerHTML = `<div class="na">Validation summary is not available in this build.</div>`; return; }
+  const M = Object.fromEntries(d.models.map((m) => [m.key, m])); const h = M.hybrid; const n = PHN();
+  $("#proofProto").textContent = d.protocol.forward_cv;
+  const f3 = (o, dd = 2) => PH.map((p) => `<span class="c-${p}">${fmt(o[p], dd)}</span>`).join(" · ");
+  $("#proofCards").innerHTML = [["OOS MAPE, %", f3(h.oos_mape), "oil · water · gas"], ["OOS WAPE, %", f3(h.oos_wape), "oil · water · gas"],
+    ["OOS R²", f3(h.oos_r2, 3), "oil · water · gas"], ["Overfit gap", sgn(h.gap_pp, 2) + " pp", "OOS minus train MAPE"],
+    ["Month-blocked CV", fmt(h.month_blocked_mean, 2) + " %", "mean MAPE"], ["P10–P90 coverage, %", f3(d.coverage_p10_p90_pct, 1), "nominal 80 %"]]
+    .map(([l, v, u]) => `<div class="kpi"><div class="label"><span class="dot" style="background:var(--teal)"></span>${l}</div><div class="v" style="font-size:15px;white-space:nowrap">${v}</div><div class="u">${u}</div></div>`).join("");
+  const order = ["physics", "ml_ridge", "ml_gbdt", "hybrid"].filter((k) => M[k]);
+  Plotly.react("proofBars", PH.map((p) => ({ type: "bar", x: order.map((k) => T(MNAME[k])), y: order.map((k) => M[k].oos_mape[p]), name: n[p], marker: { color: C[p] },
+    text: order.map((k) => fmt(M[k].oos_mape[p], 2)), textposition: "outside", cliponaxis: false, textfont: { family: "JetBrains Mono", size: 11, color: C.muted }, hovertemplate: "%{y:.2f} %<extra>" + n[p] + "</extra>" })),
+    lay({ barmode: "group", hovermode: "closest", margin: { l: 60, r: 16, t: 34, b: 40 }, xaxis: AX({ type: "category" }), yaxis: AX({ title: { text: "OOS MAPE, %" }, rangemode: "tozero" }) }), CFG);
+  const ci = (m, p) => { const v = m.vs_hybrid && m.vs_hybrid[p]; if (!v) return "–"; const sig = v.ci_lo > 0 || v.ci_hi < 0;
+    return `<span class="${sig ? (v.delta_pp > 0 ? "c-red" : "up") : "c-dim"}">${sgn(v.delta_pp, 2)} [${sgn(v.ci_lo, 2)}; ${sgn(v.ci_hi, 2)}]</span>`; };
+  $("#proofTable").innerHTML = `<tr><th>Model</th><th class="n">Train MAPE</th><th class="n">OOS MAPE</th><th class="n">OOS WAPE</th><th class="n">OOS R²</th><th class="n">Overfit gap, pp</th><th class="n">Month-blocked</th><th class="n">Choke elasticity</th><th class="n">Δ vs hybrid, pp [95 % CI]</th></tr>` +
+    order.map((k) => { const m = M[k]; const e = m.sanity.choke_elasticity_min;
+      return `<tr class="${k === "hybrid" ? "best" : ""}"><td><b>${T(MNAME[k])}</b></td><td class="n">${f3(m.train_mape)}</td><td class="n">${f3(m.oos_mape)}</td><td class="n">${f3(m.oos_wape)}</td><td class="n">${f3(m.oos_r2, 3)}</td>
+        <td class="n ${m.gap_pp > 5 ? "c-red" : ""}">${sgn(m.gap_pp, 2)}</td><td class="n">${fmt(m.month_blocked_mean, 2)}</td><td class="n ${e <= 0 ? "c-red" : ""}">${sgn(e, 2)}</td>
+        <td class="n" style="white-space:normal">${k === "hybrid" ? "–" : PH.map((p) => ci(m, p)).join("<br>")}</td></tr>`; }).join("");
+  $("#proofNote").textContent = `${d.protocol.forward_cv} · ${d.protocol.month_blocked} · ${d.protocol.bootstrap}. ` +
+    T("Choke elasticity must be positive: opening the choke cannot reduce the rate. All models: 0 negative rates, exact 0 on shut-in days.");
+  const tr2 = d.parity_hybrid.map((q) => ({ x: q.actual_norm, y: q.pred_norm, mode: "markers", name: `${n[q.phase]} · R² ${fmt(q.r2, 3)}`, marker: { color: C[q.phase], size: 7, opacity: 0.8 },
+    hovertemplate: "%{x:.3f} → %{y:.3f}<extra>" + n[q.phase] + "</extra>" }));
+  const all = d.parity_hybrid.flatMap((q) => q.actual_norm.concat(q.pred_norm)); const lo = Math.min(...all) * 0.97, hi = Math.max(...all) * 1.03;
+  tr2.push({ x: [lo, hi], y: [lo, hi], mode: "lines", line: { color: C.muted, dash: "dash", width: 1 }, name: "1:1", hoverinfo: "skip" });
+  Plotly.react("proofParity", tr2, lay({ hovermode: "closest", margin: { l: 64, r: 16, t: 40, b: 48 }, xaxis: AX({ title: { text: T("actual / well mean") } }), yaxis: AX({ title: { text: T("predicted / well mean") } }) }), CFG);
+  Plotly.react("proofCal", [{ type: "bar", x: PH.map((p) => n[p]), y: PH.map((p) => d.coverage_p10_p90_pct[p]), marker: { color: PH.map((p) => C[p]) }, text: PH.map((p) => fmt(d.coverage_p10_p90_pct[p], 1) + " %"),
+    textposition: "outside", cliponaxis: false, textfont: { family: "JetBrains Mono", size: 12, color: C.ink }, hovertemplate: "%{y:.1f} %<extra></extra>" }],
+    lay({ showlegend: false, hovermode: "closest", margin: { l: 60, r: 16, t: 30, b: 40 }, xaxis: AX({ type: "category" }), yaxis: AX({ title: { text: T("tests inside P10–P90, %") }, range: [0, 100] }),
+      shapes: [{ type: "line", xref: "paper", x0: 0, x1: 1, y0: 80, y1: 80, line: { color: C.gold, dash: "dash", width: 1.5 } }],
+      annotations: [{ xref: "paper", x: 1, y: 80, text: T("nominal 80 %"), showarrow: false, yanchor: "bottom", xanchor: "right", font: { size: 11, color: C.gold } }] }), CFG);
+  $("#proofWells").innerHTML = `<tr><th>Well</th><th>Choke regime</th><th class="n">n</th>${PH.map((p) => `<th class="n">${n[p]} MAPE, %</th>`).join("")}</tr>` +
+    h.per_well.map((r) => `<tr class="click" data-w="${esc(r.well)}"><td class="mono">${esc(r.well)}</td><td><span class="tag ${r.regime === "critical" ? "crit" : ""}">${T(r.regime)}</span></td><td class="n">${r.n}</td>${PH.map((p) => `<td class="n ${r[p] > 10 ? "c-red" : "c-" + p}">${fmt(r[p], 2)}</td>`).join("")}</tr>`).join("");
+  $$("#proofWells tr.click").forEach((r) => r.addEventListener("click", () => { if (S.wells.includes(r.dataset.w)) { setWell(r.dataset.w); tab("vfm"); } }));
+  $("#proofMissing").innerHTML = `<tr><th>Sensor</th><th class="n">Test, %</th><th class="n">Production, %</th><th class="n">Days</th><th>Handling</th></tr>` +
+    d.missing.map((m) => `<tr><td>${esc(m.sensor)}</td><td class="n">${fmt(m.test_missing_pct, 1)}</td><td class="n ${m.prod_missing_pct > 10 ? "c-red" : ""}">${fmt(m.prod_missing_pct, 2)}</td><td class="n">${m.prod_missing_days}</td>
+      <td style="white-space:normal;color:var(--muted)">${T(m.prod_missing_pct >= 99 ? "not a model input (test days only)" : m.prod_missing_days ? "carried forward within the well, row flagged" : "complete")}</td></tr>`).join("");
+  $("#proofMissNote").textContent = `${d.imputed_production_rows} / ${d.production_rows} ` + T("production well-days had a sensor gap.") + ` P_ds/WHP: ${fmt(d.regime_shift.test_median_pds_over_whp, 3)} (${T("tests")}) → ${fmt(d.regime_shift.prod_median_pds_over_whp, 3)} (${T("production")}).`;
+}
+
+// ------------------------------------------------------------------ what-if simulator
+const WI = [["choke", "Choke opening", "%", 1], ["whp", "Wellhead pressure", "psia", 1], ["pds", "Downstream pressure", "psia", 1], ["gaslift", "Gas-lift rate", "Mscf/d", 0]];
+async function whatIfInit() {
+  $("#wiScope").textContent = `· ${S.well}`; S.wi = null;
+  let j; try { j = await api(`/api/what-if?sid=${S.sid}&well=${encodeURIComponent(S.well)}`); }
+  catch (e) { $("#wiSliders").innerHTML = `<div class="na">${esc(e.message)}</div>`; $("#wiOut").innerHTML = ""; $("#wiRegime").innerHTML = ""; $("#wiNote").textContent = ""; return; }
+  S.wi = j; const b = j.base;
+  const span = { choke: [1, 100], whp: [Math.max(20, b.whp * 0.5), b.whp * 1.5], pds: [Math.max(1, b.pds * 0.4), b.pds * 1.8], gaslift: [Math.max(1, b.gaslift * 0.3), b.gaslift * 1.7] };
+  Object.entries(j.tested_range || {}).forEach(([k, [lo, hi]]) => { span[k] = [Math.max(k === "choke" ? 1 : 0.1, Math.min(lo, b[k]) * 0.9), Math.min(k === "choke" ? 100 : 1e9, Math.max(hi, b[k]) * 1.1)]; });
+  $("#wiSliders").innerHTML = WI.map(([k, l, u, d]) => `<div class="wi-row"><span>${l}</span><input type="range" data-k="${k}" min="${span[k][0]}" max="${span[k][1]}" step="${(span[k][1] - span[k][0]) / 200}" value="${b[k]}"><output id="wi_${k}">${fmt(b[k], d)} ${u}</output></div>`).join("") +
+    `<div class="wi-row"><span></span><button class="btn" id="wiReset" style="width:auto;padding:6px 14px">Reset to last day</button><span></span></div>`;
+  $$("#wiSliders input").forEach((i) => i.addEventListener("input", () => { const w = WI.find((x) => x[0] === i.dataset.k); $("#wi_" + w[0]).textContent = `${fmt(+i.value, w[3])} ${w[2]}`; clearTimeout(whatIfInit.h); whatIfInit.h = setTimeout(whatIfRun, 120); }));
+  $("#wiReset").addEventListener("click", whatIfInit);
+  whatIfShow(j);
+}
+async function whatIfRun() {
+  const q = $$("#wiSliders input").map((i) => `${i.dataset.k}=${(+i.value).toFixed(3)}`).join("&");
+  try { whatIfShow(await api(`/api/what-if?sid=${S.sid}&well=${encodeURIComponent(S.well)}&${q}`)); } catch (e) { $("#wiNote").textContent = e.message; }
+}
+function whatIfShow(j) {
+  const n = PHN();
+  $("#wiOut").innerHTML = PH.map((p) => { const d = j.delta_pct[p]; return `<div class="wi-card"><div class="label">${n[p]}</div><div class="v c-${p}">${fmt(j.rates[p], p === "gas" ? 0 : 0)}</div>
+    <div class="u">${UNIT[p]}</div><div class="d ${isNum(d) && Math.abs(d) >= 0.05 ? (d > 0 ? "up" : "down") : ""}">${isNum(d) ? sgn(d, 1) + " %" : "–"}</div></div>`; }).join("");
+  const r = j.regime; $("#wiRegime").innerHTML = `<span class="sev ${r.regime === "critical" ? "warn" : "info"}">${T(r.regime)}</span> P_ds/WHP = ${fmt(r.pds_over_whp, 3)} · ${T("critical below")} ${r.y_critical}`;
+  $("#wiNote").textContent = T("Start point") + `: ${j.base.date}. ` + (j.outside_tested_range.length ? T("Outside the tested range (extrapolation)") + `: ${j.outside_tested_range.join(", ")}. ` : "") + T(j.note);
+}
+
+// ------------------------------------------------------------------ skin economics
+function roi() {
+  const price = Math.max(0, +$("#oilPrice").value || 0);
+  const rows = (S.interp?.wells || []).filter((r) => isNum(r.dq_stb_d) && r.dq_stb_d > 0).sort((a, b) => b.dq_stb_d - a.dq_stb_d);
+  const tot = rows.reduce((a, r) => a + r.dq_stb_d, 0);
+  $("#roiTable").innerHTML = `<tr><th class="n">Priority</th><th>Well</th><th class="n">Skin S</th><th class="n">Δp skin, psi</th><th>Condition</th><th class="n">Gain, STB/d</th><th class="n">Revenue, $/day</th><th class="n">Revenue, $/year</th></tr>` +
+    (rows.map((r, i) => `<tr class="click" data-ev="${r.event_id}"><td class="n">${i + 1}</td><td class="mono">${esc(r.well)}</td><td class="n c-gold">${sgn(r.skin)}</td><td class="n">${fmt(r.dp_skin_psi, 1)}</td><td>${esc(r.class || "")}</td>
+      <td class="n c-oil">${fmt(r.dq_stb_d)}</td><td class="n">${fmt(r.dq_stb_d * price)}</td><td class="n">${fmt(r.dq_stb_d * price * 365)}</td></tr>`).join("") || `<tr><td class="c-dim" colspan="8">No build-up with positive skin in the loaded data.</td></tr>`) +
+    (rows.length ? `<tr><td></td><td class="label">Total</td><td></td><td></td><td></td><td class="n c-oil">${fmt(tot)}</td><td class="n">${fmt(tot * price)}</td><td class="n c-gold">${fmt(tot * price * 365)}</td></tr>` : "");
+  $$("#roiTable tr.click").forEach((r) => r.addEventListener("click", () => openEvent(+r.dataset.ev)));
+}
+
+// ------------------------------------------------------------------ copilot
+async function copilotOpen() {
+  $("#copilot").classList.add("open"); $("#drawer").classList.remove("open");
+  const j = await api(`/api/copilot?lang=${I18N.lang}`);
+  $("#copilotQ").innerHTML = Object.entries(j.questions).map(([k, v]) => `<button data-q="${k}">${esc(v)}</button>`).join("");
+  $$("#copilotQ button").forEach((b) => b.addEventListener("click", async () => {
+    $$("#copilotQ button").forEach((x) => x.classList.toggle("on", x === b));
+    try { const a = await api(`/api/copilot?q=${b.dataset.q}&sid=${S.sid || ""}&lang=${I18N.lang}`);
+      $("#copilotA").innerHTML = `<b>${esc(a.question)}</b><ul>${a.lines.map((l) => `<li>${esc(l)}</li>`).join("")}</ul><div class="src">${T("Source")}: ${esc(a.source)}</div>`; }
+    catch (e) { $("#copilotA").textContent = e.message; } }));
+}
+
 // ------------------------------------------------------------------ 02 measurements
 async function measurements() {
   $("#measScope").textContent = `· ${S.well}`;
@@ -334,7 +430,7 @@ async function vfm() {
   S.vfmData = await api(`/api/vfm?sid=${S.sid}&well=${encodeURIComponent(S.well)}`);
   $$("#vfmLayers .chip").forEach((c) => { const l = c.dataset.l; c.classList.toggle("on", !!S.layers[l]);
     c.disabled = (l === "a" && !S.vfmData.layers?.model_a) || (l === "b" && !S.vfmData.layers?.model_b) || (l === "tests" && !S.vfmData.tests.length); });
-  drawVfm(); residuals(S.vfmData);
+  drawVfm(); residuals(S.vfmData); whatIfInit();
 }
 function drawVfm() {
   const v = S.vfmData; if (!v) return; const Ly = S.layers;
@@ -475,6 +571,7 @@ function wellTable() {
     }).join("")}</tr>`).join("");
   $$("#wellTable th.sortable").forEach((th) => th.addEventListener("click", () => { const c = th.dataset.k; S.sort = { k: c, d: S.sort.k === c ? -S.sort.d : -1 }; wellTable(); }));
   $$("#wellTable tr.click").forEach((tr) => tr.addEventListener("click", () => { const ev = tr.dataset.ev; if (ev !== "") openEvent(+ev); else { setWell(tr.dataset.w); tab("vfm"); } }));
+  roi();
   const al = S.interp?.alerts || [];
   $("#alertCount").textContent = `${al.filter((a) => a.severity !== "info").length} open · ${al.length} total`;
   $("#alertTable").innerHTML = `<tr><th>Severity</th><th>Well</th><th>Type</th><th>Detail</th></tr>` +
@@ -514,6 +611,9 @@ $("#btnField").addEventListener("click", () => loadField(S.fieldCode || (S.sourc
 $$("#vfmLayers .chip").forEach((c) => c.addEventListener("click", () => { if (c.disabled) return; S.layers[c.dataset.l] = !S.layers[c.dataset.l]; c.classList.toggle("on", S.layers[c.dataset.l]); drawVfm(); }));
 $$("[data-ml]").forEach((c) => c.addEventListener("click", () => { S.mlayers[c.dataset.ml] = !S.mlayers[c.dataset.ml]; c.classList.toggle("on", S.mlayers[c.dataset.ml]); if (S.sid) measurements(); }));
 $("#btnDemo").addEventListener("click", () => demo());
+$("#oilPrice").addEventListener("input", roi);
+$("#btnCopilot").addEventListener("click", () => copilotOpen().catch((e) => toast(e.message)));
+$("#copilotX").addEventListener("click", () => $("#copilot").classList.remove("open"));
 $("#file").addEventListener("change", (e) => { upload(e.target.files); e.target.value = ""; });
 const drop = $("#drop");
 ["dragenter", "dragover"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); }));
@@ -539,7 +639,8 @@ function setLang(l) {
   I18N.lang = l; try { localStorage.setItem("cx_lang", l); } catch (e) { /* storage unavailable */ }
   $$("#langSeg button").forEach((x) => x.classList.toggle("on", x.dataset.lang === l));
   trAll();
-  if (S.sid) { buildRange(); Promise.all([overview(), measurements(), vfm(), monthly()]).then(() => pta()).catch((e) => toast(e.message)); }
+  $("#copilot").classList.remove("open");
+  if (S.sid) { buildRange(); Promise.all([overview(), measurements(), vfm(), monthly(), proof()]).then(() => pta()).catch((e) => toast(e.message)); }
 }
 $$("#langSeg button").forEach((x) => x.classList.toggle("on", x.dataset.lang === I18N.lang)); trAll();
 boot();

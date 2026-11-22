@@ -494,6 +494,170 @@ def monthly(sid: str, well: str = Query("ALL")):
                               "gas_mscf": float(F[RATES["gas"]].sum()), "days": int(F.date.nunique())}})
 
 
+PROOF_PATH = BASE / "static" / "model_proof.json"   # built offline by experiments/v6_final_audit/model_proof.py
+Y_CRIT = 0.55                                       # P_ds / WHP below this: critical (choked) flow, P_ds has no effect
+
+
+def _proof() -> dict:
+    return json.loads(PROOF_PATH.read_text()) if PROOF_PATH.exists() else {}
+
+
+@app.get("/api/model-proof")
+def model_proof():
+    """Pure physics vs pure ML vs hybrid on the frozen validation protocol (pre-computed aggregates)."""
+    d = _proof()
+    return ok({"available": bool(d), **d})
+
+
+def _regime(pds: float, whp: float) -> dict:
+    y = pds / whp if whp > 0 else float("nan")
+    return {"pds_over_whp": y, "regime": "critical" if y <= Y_CRIT else "sub-critical", "y_critical": Y_CRIT}
+
+
+@app.get("/api/what-if")
+def what_if(sid: str, well: str, choke: float | None = None, whp: float | None = None, pds: float | None = None,
+            gaslift: float | None = None):
+    """Rates from the deployed model for edited choke / WHP / P_ds / gas-lift, starting from the well's last flowing day."""
+    s = session(sid)
+    P = s["R"]["P"].assign(date=lambda d: pd.to_datetime(d.date))
+    g = P[(P.well_name == well) & (P.uptime >= 0.99)].sort_values("date")
+    if g.empty:
+        raise HTTPException(404, f"Well {well} has no full-uptime day in the loaded data.")
+    m = model()
+    if well not in m.a.M["Cw"]:
+        raise HTTPException(422, f"Well {well} has no calibration in the deployed model (no separator test): what-if is not available.")
+    b = g.iloc[-1]
+    base = {"choke": float(b.choke_opening_pct), "whp": float(b.whp_psia), "pds": float(b.whp_downstream_psia),
+            "gaslift": float(b.gas_lift_rate_mscfd), "pbh": float(b.dh_pressure_psia), "date": b.date.strftime("%Y-%m-%d")}
+    new = {"choke": base["choke"] if choke is None else float(np.clip(choke, 1, 100)),
+           "whp": base["whp"] if whp is None else float(max(whp, 20)), "pds": base["pds"] if pds is None else float(max(pds, 1)),
+           "gaslift": base["gaslift"] if gaslift is None else float(max(gaslift, 1))}
+    if new["pds"] >= new["whp"]:
+        raise HTTPException(422, "Downstream pressure must be below wellhead pressure: no flow through the choke otherwise.")
+
+    def rates(v):
+        D = pd.DataFrame([{"well_name": well, "date": b.date, "uptime": 1.0, "whp_psia": v["whp"], "whp_downstream_psia": v["pds"],
+                           "dh_pressure_psia": base["pbh"], "gas_lift_rate_mscfd": v["gaslift"], "choke_opening_pct": v["choke"]}])
+        r = m.predict_daily(D).iloc[0]
+        return {ph: float(r[RATES[ph]]) for ph in PH}
+    r0, r1 = rates(base), rates(new)
+    tr = s["R"].get("Tq")
+    lim = {}
+    if tr is not None and len(tr):
+        tw = tr[tr.well_name == well]
+        for k, c in (("choke", "choke_opening_pct"), ("whp", "whp_psia"), ("pds", "whp_downstream_psia"), ("gaslift", "gas_lift_rate_mscfd")):
+            if c in tw and len(tw):
+                lim[k] = [float(tw[c].min()), float(tw[c].max())]
+    outside = [k for k, (lo, hi) in lim.items() if not (lo * 0.9 <= new[k] <= hi * 1.1)]
+    return ok({"well": well, "base": base, "inputs": new, "base_rates": r0, "rates": r1,
+               "delta_pct": {ph: (r1[ph] / r0[ph] - 1) * 100 if r0[ph] > 0 else None for ph in PH},
+               "regime": _regime(new["pds"], new["whp"]), "base_regime": _regime(base["pds"], base["whp"]),
+               "tested_range": lim, "outside_tested_range": outside,
+               "note": "Bottom-hole pressure is held at the base day value; the model is calibrated on separator tests, so inputs far "
+                       "outside the tested range are extrapolation."})
+
+
+COPILOT_Q = {"hybrid": ("Why is the hybrid model better than pure physics and pure ML?", "Hibrid model niyə təmiz fizikadan və təmiz ML-dən yaxşıdır?"),
+             "overfit": ("How do you know the model is not overfitted?", "Modelin overfit olmadığını haradan bilirsiniz?"),
+             "stim": ("Which well needs stimulation first?", "Hansı quyu birinci stimulyasiya olunmalıdır?"),
+             "missing": ("How is missing sensor data handled?", "Çatışmayan sensor datası necə emal olunur?"),
+             "gas": ("Why is the gas error higher than the oil error?", "Qaz xətası niyə neft xətasından böyükdür?"),
+             "limits": ("When should the model not be trusted?", "Modelə nə vaxt etibar etmək olmaz?")}
+
+
+@app.get("/api/copilot")
+def copilot(q: str = "", sid: str = "", lang: str = "en"):
+    """Deterministic engineering answers assembled from computed numbers only (no language model, works offline)."""
+    az = lang == "az"
+    T_ = lambda en, a: a if az else en
+    if q not in COPILOT_Q:
+        return ok({"questions": {k: T_(*v) for k, v in COPILOT_Q.items()}})
+    d = _proof()
+    M_ = {m["key"]: m for m in d.get("models", [])}
+    f3 = lambda x, n=2: " / ".join(f"{x[p]:.{n}f}" for p in PH)
+    owg = T_("oil / water / gas", "neft / su / qaz")
+    PHN = {"oil": T_("oil", "neft"), "water": T_("water", "su"), "gas": T_("gas", "qaz")}
+    lines, src = [], T_("validation summary (frozen forward CV)", "validasiya xülasəsi (dondurulmuş irəli CV)")
+    out = lambda: ok({"q": q, "question": T_(*COPILOT_Q[q]), "lines": lines, "source": src})
+    if q in ("hybrid", "overfit", "gas") and not M_:
+        lines = [T_("Validation summary file is not available in this build.", "Validasiya xülasəsi faylı bu versiyada yoxdur.")]
+        return out()
+    if q == "hybrid":
+        h, ph_ = M_["hybrid"], M_["physics"]
+        lines = [T_(f"Forward-CV MAPE {owg}: hybrid {f3(h['oos_mape'])} %, pure physics {f3(ph_['oos_mape'])} %.",
+                    f"İrəli CV MAPE {owg}: hibrid {f3(h['oos_mape'])} %, təmiz fizika {f3(ph_['oos_mape'])} %."),
+                 T_(f"R² {owg}: hybrid {f3(h['oos_r2'], 3)}, pure physics {f3(ph_['oos_r2'], 3)}.",
+                    f"R² {owg}: hibrid {f3(h['oos_r2'], 3)}, təmiz fizika {f3(ph_['oos_r2'], 3)}.")]
+        for p in PH:
+            v = ph_["vs_hybrid"][p]
+            sig = v["ci_lo"] > 0 or v["ci_hi"] < 0
+            lines.append(T_(f"{PHN[p]}: pure physics is {v['delta_pp']:+.2f} pp vs the hybrid (95 % CI {v['ci_lo']:+.2f} to {v['ci_hi']:+.2f}); "
+                            + ("significant." if sig else "not statistically significant."),
+                            f"{PHN[p]}: təmiz fizika hibriddən {v['delta_pp']:+.2f} f.b. fərqlənir (95 % etibarlılıq intervalı {v['ci_lo']:+.2f} … {v['ci_hi']:+.2f}); "
+                            + ("fərq əhəmiyyətlidir." if sig else "fərq statistik əhəmiyyətli deyil.")))
+        for k, nm in (("ml_ridge", T_("Pure ML (Ridge on raw sensors)", "Təmiz ML (xam sensorlarda Ridge)")), ("ml_gbdt", T_("Pure ML (boosted trees)", "Təmiz ML (boosting ağacları)"))):
+            if k in M_:
+                e = M_[k]["sanity"]["choke_elasticity_min"]
+                lines.append(T_(f"{nm}: MAPE {f3(M_[k]['oos_mape'])} %, train-to-OOS gap {M_[k]['gap_pp']:+.2f} pp (hybrid {h['gap_pp']:+.2f} pp); "
+                                f"minimum choke elasticity {e:+.2f}" + (" (unphysical: opening the choke lowers the rate)." if e <= 0 else "."),
+                                f"{nm}: MAPE {f3(M_[k]['oos_mape'])} %, təlim–OOS fərqi {M_[k]['gap_pp']:+.2f} f.b. (hibrid {h['gap_pp']:+.2f} f.b.); "
+                                f"minimum ştuser elastikliyi {e:+.2f}" + (" (qeyri-fiziki: ştuser açılanda debit azalır)." if e <= 0 else ".")))
+    elif q == "overfit":
+        h = M_["hybrid"]
+        cov = " / ".join(f"{d['coverage_p10_p90_pct'].get(p, float('nan')):.1f}" for p in PH)
+        lines = [T_(f"Train MAPE {f3(h['train_mape'])} % vs forward out-of-sample {f3(h['oos_mape'])} %: gap {h['gap_pp']:+.2f} pp.",
+                    f"Təlim MAPE {f3(h['train_mape'])} %, irəli nümunədən kənar {f3(h['oos_mape'])} %: fərq {h['gap_pp']:+.2f} f.b."),
+                 T_(f"Month-blocked CV mean MAPE {h['month_blocked_mean']:.2f} % (every calendar month held out in turn).",
+                    f"Ay-bloklu CV orta MAPE {h['month_blocked_mean']:.2f} % (hər təqvim ayı növbə ilə kənarda saxlanır)."),
+                 T_(f"Protocol: {d['protocol']['forward_cv']}; hyper-parameters are chosen inside each training fold only.",
+                    "Protokol: 4 kəsim, 90 günlük üfüq, n = 109; hiperparametrlər yalnız hər təlim qatının daxilində seçilir."),
+                 T_(f"P10–P90 coverage {owg}: {cov} % (nominal 80 %).", f"P10–P90 əhatəsi {owg}: {cov} % (nominal 80 %).")]
+    elif q == "gas":
+        h = M_["hybrid"]
+        worst = ", ".join(f"{r['well']} {r['gas']:.1f} %" for r in sorted(h["per_well"], key=lambda r: -r["gas"])[:2])
+        lines = [T_(f"Forward-CV MAPE: oil {h['oos_mape']['oil']:.2f} %, gas {h['oos_mape']['gas']:.2f} %.",
+                    f"İrəli CV MAPE: neft {h['oos_mape']['oil']:.2f} %, qaz {h['oos_mape']['gas']:.2f} %."),
+                 T_("Gas = oil rate × GOR, so the gas error contains the oil error plus the GOR-trend error between tests.",
+                    "Qaz = neft debiti × GOR; ona görə qaz xətasına neft xətası və testlər arasındakı GOR trendinin xətası daxildir."),
+                 T_(f"Largest gas errors: {worst}.", f"Ən böyük qaz xətaları: {worst}.")]
+    elif q == "missing":
+        lines = [T_(f"{m['sensor']}: missing on {m['prod_missing_pct']:.2f} % of production days, {m['test_missing_pct']:.0f} % of test days.",
+                    f"{m['sensor']}: istehsal günlərinin {m['prod_missing_pct']:.2f} %-də, test günlərinin {m['test_missing_pct']:.0f} %-də yoxdur.") for m in d.get("missing", [])]
+        lines += [T_(f"{d.get('imputed_production_rows', 0)} of {d.get('production_rows', 0)} production well-days had a sensor gap: the value is carried "
+                     "forward (then backward) within the same well and the row is flagged 'imputed'; a full shut-in day is exactly 0.",
+                     f"{d.get('production_rows', 0)} istehsal quyu-günündən {d.get('imputed_production_rows', 0)}-də sensor boşluğu var: dəyər eyni quyunun "
+                     "əvvəlki (sonra növbəti) günündən götürülür və sətir 'imputed' kimi işarələnir; tam bağlanma günündə debit dəqiq 0-dır."),
+                  T_("Sensors that exist only on test days (annulus pressure, downhole temperature) are not model inputs.",
+                     "Yalnız test günlərində olan sensorlar (annulus təzyiqi, quyudibi temperaturu) modelin girişi deyil.")]
+        src = T_("missing-data audit", "çatışmayan data auditi")
+    elif q == "limits":
+        lines = [T_("No separator test for the well: rates use field-median calibration and are flagged uncalibrated.",
+                    "Quyunun separator testi yoxdursa: debit yataq medianı ilə kalibrlənir və 'kalibrlənməyib' kimi işarələnir."),
+                 T_("More than 180 days after the last test: water-cut and GOR trends are frozen, not extrapolated.",
+                    "Son testdən 180 gündən çox keçibsə: su payı və GOR trendləri dondurulur, ekstrapolyasiya edilmir."),
+                 T_("Inputs far outside the tested choke / pressure range are extrapolation (the what-if panel flags this).",
+                    "Sınaqdan keçmiş ştuser / təzyiq diapazonundan çox kənar girişlər ekstrapolyasiyadır (what-if paneli bunu göstərir).")]
+        lo = json.loads(CARD_PATH.read_text()).get("vfm", {}).get("leave_one_well_out", {}) if CARD_PATH.exists() else {}
+        if lo:
+            v = " / ".join(f"{lo[p]['MAPE_%']:.1f}" for p in PH)
+            lines.append(T_(f"Unseen-well (leave-one-well-out) MAPE {owg}: {v} %.", f"Görülməmiş quyu (leave-one-well-out) MAPE {owg}: {v} %."))
+        src = T_("model card", "model kartı")
+    elif q == "stim":
+        if not sid:
+            lines = [T_("Load a dataset first.", "Əvvəlcə data yükləyin.")]
+            return out()
+        rows = [x for x in pta_rows(session(sid)["R"]) if x.get("skin") is not None and x["skin"] > 0 and x.get("dq_stb_d")]
+        rows.sort(key=lambda x: -x["dq_stb_d"])
+        lines = [T_(f"{x['well']}: skin {x['skin']:+.2f}, Δp_skin {x['dp_skin_psi']:.0f} psi, theoretical gain {x['dq_stb_d']:.0f} STB/d if skin is removed.",
+                    f"{x['well']}: skin {x['skin']:+.2f}, Δp_skin {x['dp_skin_psi']:.0f} psi, skin aradan qaldırılsa nəzəri artım {x['dq_stb_d']:.0f} STB/gün.")
+                 for x in rows] or [T_("No build-up with positive skin in the loaded data.", "Yüklənmiş datada müsbət skinli bərpa yoxdur.")]
+        if rows:
+            lines.append(T_(f"First candidate: {rows[0]['well']}. The gain is an upper bound at constant drawdown, used for ranking.",
+                            f"Birinci namizəd: {rows[0]['well']}. Artım sabit depressiyada yuxarı həddir və sıralama üçün istifadə olunur."))
+        src = T_("PTA results of the loaded dataset", "yüklənmiş datanın PTA nəticələri")
+    return out()
+
+
 @app.get("/api/summary")
 def get_summary(sid: str):
     return ok(summary(session(sid)))

@@ -139,3 +139,21 @@ def test_monthly_analysis_is_consistent_with_daily_rates():
     assert m["months"][0]["oil_avg_mom_pct"] is None and all(r["days"] > 0 for r in m["months"])
     assert len(m["surface"]["oil"]) == len(j["wells"]) and len(m["matrix"]["months"]) == len(m["months"])
     assert client.get("/api/vfm?sid=field&well=ALL").status_code == 404        # field results are not reachable by a guessable id
+
+
+def test_model_proof_what_if_and_copilot():
+    p = _check(client.get("/api/model-proof"))
+    if p["available"]:
+        keys = {m["key"] for m in p["models"]}
+        assert {"physics", "hybrid"} <= keys and all(m["sanity"]["negative_rates"] == 0 for m in p["models"])
+    j = _check(client.post("/api/demo"))
+    w0 = _check(client.get(f"/api/what-if?sid={j['sid']}&well={j['wells'][0]}"))
+    assert all(v > 0 for v in w0["rates"].values()) and w0["regime"]["regime"] in ("critical", "sub-critical")
+    w1 = _check(client.get(f"/api/what-if?sid={j['sid']}&well={j['wells'][0]}&choke={min(100, w0['base']['choke'] * 1.1)}"))
+    assert w1["rates"]["oil"] > w0["rates"]["oil"]                      # opening the choke raises the rate
+    assert client.get(f"/api/what-if?sid={j['sid']}&well={j['wells'][0]}&pds=99999").status_code == 422
+    qs = _check(client.get("/api/copilot"))["questions"]
+    for q in qs:
+        for lang in ("en", "az"):
+            a = _check(client.get(f"/api/copilot?q={q}&sid={j['sid']}&lang={lang}"))
+            assert a["lines"] and all(isinstance(x, str) and x for x in a["lines"])

@@ -20,6 +20,7 @@
     <span id="dsPill" class="pill">No dataset loaded</span>
     <span id="dsBadge" class="badge none">NO DATA</span>
     <div class="seg" id="langSeg"><button data-lang="az" class="on">AZ</button><button data-lang="en">EN</button></div>
+    <button id="btnCopilot" class="btn-notes">Copilot</button>
     <button id="btnNotes" class="btn-notes" title="Engineering notes and input check">Notes <span id="notesCnt" class="cnt zero">0</span></button>
   </div>
 </header>
@@ -62,6 +63,7 @@
         <button data-tab="meas"><span class="step">03</span>Measurements</button>
         <button data-tab="vfm"><span class="step">04</span>VFM &amp; Predictions</button>
         <button data-tab="pta"><span class="step">05</span>PTA &amp; Reservoir</button>
+        <button data-tab="proof"><span class="step">06</span>Model proof</button>
       </nav>
       <div class="tools"><span class="label">Period</span>
         <div class="seg months" id="rangeSeg"><button data-r="all" class="on">Whole period</button></div>
@@ -121,6 +123,12 @@
         <p class="note">Solid line = submitted blend. Zoom or pan any phase: all three phases and the range presets stay in sync.</p></div>
       <div class="panel"><div class="hd"><h3>Predicted vs separator test <span class="sc" id="residScope"></span></h3><span class="label" id="residNote"></span></div>
         <div class="tablewrap" id="residWrap"></div></div>
+      <div class="panel"><div class="hd"><h3>What-if simulator <span class="sc" id="wiScope"></span></h3><span id="wiRegime" class="srcbadge"></span></div>
+        <div class="wi-grid">
+          <div class="wi-sliders" id="wiSliders"></div>
+          <div class="wi-out" id="wiOut"></div>
+        </div>
+        <p class="note">Slider range = tested range ± 10 %.</p><p class="note" id="wiNote"></p></div>
       <details class="method" id="methodBox"><summary>Model &amp; formula transparency</summary><div class="mgrid" id="methodGrid"></div></details>
     </section>
 
@@ -138,8 +146,33 @@
       </div>
       <div class="panel"><div class="hd"><h3>Multi-well comparison &amp; intervention priority</h3><span class="label">sort by header · open by row</span></div>
         <div class="tablewrap"><table id="wellTable"></table></div>
+        <div class="hd" style="margin-top:14px"><h3>Skin damage · economic impact</h3>
+          <label class="price">Oil price, $/bbl <input id="oilPrice" type="number" min="1" max="300" step="1" value="70"></label></div>
+        <div class="tablewrap"><table id="roiTable"></table></div>
+        <p class="note">Gain = theoretical oil rate if skin is removed at constant drawdown (upper bound, for ranking). Revenue = gain × 365 × oil price; intervention cost is not included.</p>
         <div class="hd" style="margin-top:14px"><h3>Engineer alerts</h3><span class="label" id="alertCount"></span></div>
         <div class="tablewrap"><table id="alertTable"></table></div></div>
+    </section>
+    <section id="tab-proof" class="tab">
+      <div class="context"><div><h1>Model proof</h1>
+        <div class="sub">Pure physics vs pure ML vs the submitted hybrid on the same frozen validation · <span id="proofProto"></span></div></div></div>
+      <div class="kpis" id="proofCards"></div>
+      <div class="panel"><div class="hd"><h3>Physics vs ML vs hybrid</h3><span class="label">forward out-of-sample · lower MAPE is better</span></div>
+        <div id="proofBars" class="chart" style="height:360px"></div>
+        <div class="tablewrap"><table id="proofTable"></table></div>
+        <p class="note" id="proofNote"></p></div>
+      <div class="mon-grid">
+        <div class="panel"><div class="hd"><h3>Actual vs predicted · hybrid</h3><span class="label">out-of-sample tests · normalised by well mean</span></div>
+          <div id="proofParity" class="chart" style="height:420px"></div></div>
+        <div class="panel"><div class="hd"><h3>P10–P90 calibration</h3><span class="label">share of tests inside the band · nominal 80 %</span></div>
+          <div id="proofCal" class="chart" style="height:420px"></div></div>
+      </div>
+      <div class="mon-grid">
+        <div class="panel"><div class="hd"><h3>Per-well out-of-sample error · hybrid</h3><span class="label">choke regime tagged</span></div>
+          <div class="tablewrap"><table id="proofWells"></table></div></div>
+        <div class="panel"><div class="hd"><h3>Missing-data resilience</h3><span class="label">sensor coverage · test vs production days</span></div>
+          <div class="tablewrap"><table id="proofMissing"></table></div><p class="note" id="proofMissNote"></p></div>
+      </div>
     </section>
   </main>
 </div>
@@ -147,6 +180,10 @@
 <aside class="drawer" id="drawer">
   <div class="hd"><span class="label">Engineering notes</span><button class="x" id="drawerX">Close</button></div>
   <div class="bd" id="drawerBody"></div>
+</aside>
+<aside class="drawer" id="copilot">
+  <div class="hd"><span class="label">Well copilot · answers from computed results only</span><button class="x" id="copilotX">Close</button></div>
+  <div class="bd"><div id="copilotQ" class="cq"></div><div id="copilotA" class="ca"></div></div>
 </aside>
 <div class="toast" id="toast"></div>
 <script src="/static/i18n.js"></script>
