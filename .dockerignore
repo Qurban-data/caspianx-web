@@ -1,0 +1,20 @@
+# never ship organiser data, outputs, packages or local environments in the image
+data/
+outputs/
+deliverables_v3/
+submission/
+submissions/
+demo/
+portal_upload/
+presentation/
+backups/
+pitch/
+reports/
+qa/
+tests/
+docs/
+*.zip
+.git/
+.venv/
+**/__pycache__/
+*.pyc

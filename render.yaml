@@ -1,0 +1,10 @@
+# Render.com blueprint: New + > Blueprint > select this repository. Free plan, Docker runtime, no Streamlit.
+services:
+  - type: web
+    name: caspianx-well-intel
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /api/health
+    autoDeploy: true
