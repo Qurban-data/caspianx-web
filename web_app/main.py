@@ -29,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from fastapi import Form, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Form, FastAPI, Request, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
@@ -61,9 +61,94 @@ _DEF_LOCK = threading.Lock()
 SESSIONS: "OrderedDict[str, dict]" = OrderedDict()
 
 
+PUBLIC_HOST = bool(os.environ.get("VERCEL") or os.environ.get("RENDER") or os.environ.get("SPACE_ID"))
+
+
+# ------------------------------------------------------------------------------------------------ authentication
+# Passwords are stored only as PBKDF2-HMAC-SHA256 hashes (200 000 iterations). Sessions are stateless signed cookies,
+# so they survive restarts and work on multi-instance hosts.
+USERS = {
+    "qurban": {"name": "Qurban Rəcəbov", "role": "engineer", "salt": "782be46b4163fc4d6dd79fcd37d6af12", "hash": "467d6aea6ff4478cb0e4a80df16af0e221faf16ec77cd86a00d646b311a42539"},
+    "jury": {"name": "Jury evaluator", "role": "jury", "salt": "06aaf63758ee2081487328251ea3ee86", "hash": "f4307e05810f9855f7b07dbf60dae821eb3dbcb7554bd55a789007e172d9a57d"},
+}
+AUTH_SECRET = (os.environ.get("CASPIANX_SECRET") or hashlib.sha256(("cx:" + "".join(u["hash"] for u in USERS.values())).encode()).hexdigest()).encode()
+AUTH_COOKIE, AUTH_TTL = "cx_session", 12 * 3600
+JURY_QUICK = os.environ.get("CASPIANX_JURY_QUICK", "1") != "0"
+AUTH_OPEN = ("/api/health", "/api/auth/login", "/api/auth/logout", "/api/auth/me", "/api/auth/jury")
+
+
+def _check_password(user: str, password: str) -> bool:
+    u = USERS.get(user)
+    if not u:
+        hashlib.pbkdf2_hmac("sha256", password.encode(), b"0" * 16, 200_000)      # same work for unknown users
+        return False
+    h = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(u["salt"]), 200_000).hex()
+    return hmac.compare_digest(h, u["hash"])
+
+
+def _token(user: str) -> str:
+    exp = str(int(time.time()) + AUTH_TTL)
+    sig = hmac.new(AUTH_SECRET, f"{user}.{exp}".encode(), hashlib.sha256).hexdigest()
+    return f"{user}.{exp}.{sig}"
+
+
+def _user_from(request) -> str | None:
+    t = request.cookies.get(AUTH_COOKIE, "")
+    parts = t.split(".")
+    if len(parts) != 3 or parts[0] not in USERS or not parts[1].isdigit():
+        return None
+    good = hmac.new(AUTH_SECRET, f"{parts[0]}.{parts[1]}".encode(), hashlib.sha256).hexdigest()
+    return parts[0] if hmac.compare_digest(good, parts[2]) and int(parts[1]) > time.time() else None
+
+
+@app.middleware("http")
+async def _require_auth(request, call_next):
+    p = request.url.path
+    if p.startswith("/api/") and p not in AUTH_OPEN and _user_from(request) is None:
+        return JSONResponse({"ok": False, "auth_required": True, "error": "Sign in required."}, status_code=401)
+    return await call_next(request)
+
+
+def _signed_in(user: str) -> JSONResponse:
+    r = ok({"user": user, "name": USERS[user]["name"], "role": USERS[user]["role"]})
+    r.set_cookie(AUTH_COOKIE, _token(user), max_age=AUTH_TTL, httponly=True, samesite="lax", secure=PUBLIC_HOST)
+    return r
+
+
+@app.post("/api/auth/login")
+def auth_login(username: str = Form(""), password: str = Form("")):
+    user = username.strip().lower()
+    if not _check_password(user, password):
+        time.sleep(0.3)
+        return JSONResponse({"ok": False, "error": "Wrong username or password."}, status_code=401)
+    return _signed_in(user)
+
+
+@app.post("/api/auth/jury")
+def auth_jury():
+    """One-click evaluator access (no password travels to the browser). Disable with CASPIANX_JURY_QUICK=0."""
+    if not JURY_QUICK:
+        raise HTTPException(403, "Quick jury access is disabled.")
+    return _signed_in("jury")
+
+
+@app.post("/api/auth/logout")
+def auth_logout():
+    r = ok({})
+    r.delete_cookie(AUTH_COOKIE)
+    return r
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request):
+    u = _user_from(request)
+    if u is None:
+        return JSONResponse({"ok": False, "auth_required": True, "jury_quick": JURY_QUICK}, status_code=401)
+    return ok({"user": u, "name": USERS[u]["name"], "role": USERS[u]["role"]})
+
+
 PRELOAD = BASE / "preload" / "field_session.pkl"   # built by tools/build_preload.py (derived results, no per-minute data)
 ACCESS_CODE = os.environ.get("CASPIANX_ACCESS_CODE", "")
-PUBLIC_HOST = bool(os.environ.get("VERCEL"))
 
 
 def _default_sid(code: str) -> str:
@@ -565,11 +650,27 @@ COPILOT_Q = {"hybrid": ("Why is the hybrid model better than pure physics and pu
              "limits": ("When should the model not be trusted?", "Modelə nə vaxt etibar etmək olmaz?")}
 
 
+COPILOT_KW = {"stim": ("stimul", "skin", "acid", "turşu", "zədə", "damage", "priorit"), "missing": ("missing", "gap", "sensor", "çatış", "boşluq", "nan"),
+              "gas": ("gas", "qaz", "gor"), "overfit": ("overfit", "əzbər", "leak", "valid", "cv", "trust the metric"),
+              "limits": ("limit", "trust", "etibar", "when not", "hədd", "unseen", "new well", "yeni quyu"),
+              "hybrid": ("hybrid", "hibrid", "physics", "fizika", "ml", "why", "niyə", "better", "yaxşı")}
+
+
 @app.get("/api/copilot")
-def copilot(q: str = "", sid: str = "", lang: str = "en"):
+def copilot(q: str = "", sid: str = "", lang: str = "en", text: str = ""):
     """Deterministic engineering answers assembled from computed numbers only (no language model, works offline)."""
     az = lang == "az"
     T_ = lambda en, a: a if az else en
+    if q not in COPILOT_Q and text.strip():
+        low = text.lower()
+        for key, words in COPILOT_KW.items():
+            if any(w in low for w in words):
+                q = key
+                break
+        else:
+            return ok({"q": "", "question": text, "matched": False, "questions": {k: T_(*v) for k, v in COPILOT_Q.items()},
+                       "lines": [T_("I answer only from computed results. Try one of the questions below.",
+                                    "Yalnız hesablanmış nəticələrdən cavab verirəm. Aşağıdakı suallardan birini seçin.")], "source": "-"})
     if q not in COPILOT_Q:
         return ok({"questions": {k: T_(*v) for k, v in COPILOT_Q.items()}})
     d = _proof()
@@ -656,6 +757,49 @@ def copilot(q: str = "", sid: str = "", lang: str = "en"):
                             f"Birinci namizəd: {rows[0]['well']}. Artım sabit depressiyada yuxarı həddir və sıralama üçün istifadə olunur."))
         src = T_("PTA results of the loaded dataset", "yüklənmiş datanın PTA nəticələri")
     return out()
+
+
+@app.get("/api/anomalies")
+def anomalies(sid: str):
+    """Rule-based surveillance over every well-day of the loaded data (structured rows; the UI renders the text)."""
+    s = session(sid)
+    P = s["R"]["P"].assign(date=lambda d: pd.to_datetime(d.date)).sort_values(["well_name", "date"])
+    V = s["R"]["Bl"].assign(date=lambda d: pd.to_datetime(d.date))
+    rows = []
+    d8 = lambda x: pd.Timestamp(x).strftime("%Y-%m-%d")
+    for w, g in P.groupby("well_name"):
+        up = g.uptime.values
+        for kind, mask, sev in (("shut_in", up <= 0, "warn"), ("partial_uptime", (up > 0) & (up < 0.95), "info")):
+            if mask.any():
+                dd = g.date[mask]
+                rows.append({"well": w, "type": kind, "severity": sev, "days": int(mask.sum()), "first": d8(dd.min()), "last": d8(dd.max())})
+        if "imputed" in g and g.imputed.any():
+            dd = g.date[g.imputed.values]
+            rows.append({"well": w, "type": "sensor_gap", "severity": "warn", "days": int(g.imputed.sum()), "first": d8(dd.min()), "last": d8(dd.max())})
+        fl = g[g.uptime > 0]
+        if len(fl):
+            y = (fl.whp_downstream_psia / fl.whp_psia).values
+            crit = y <= Y_CRIT
+            if crit.any():
+                rows.append({"well": w, "type": "critical_choke", "severity": "info", "days": int(crit.sum()), "share_pct": float(crit.mean() * 100),
+                             "value": float(np.nanmedian(y)), "first": d8(fl.date[crit].min()), "last": d8(fl.date[crit].max())})
+        v = V[V.well_name == w].assign(m=lambda d: d.date.dt.to_period("M").astype(str)).groupby("m")[list(RATES.values())].sum()
+        v = v[v.oil_rate_stbd > 0]
+        if len(v) >= 2:
+            wc = v.water_rate_stbd / (v.oil_rate_stbd + v.water_rate_stbd) * 100
+            gor = v.gas_rate_mscfd * 1000 / v.oil_rate_stbd
+            dq = (v.oil_rate_stbd.iloc[-1] / pd.Period(v.index[-1]).days_in_month) / (v.oil_rate_stbd.iloc[0] / pd.Period(v.index[0]).days_in_month)
+            if wc.iloc[-1] - wc.iloc[0] >= 5:
+                rows.append({"well": w, "type": "water_cut_drift", "severity": "warn", "from": float(wc.iloc[0]), "to": float(wc.iloc[-1]),
+                             "first": v.index[0], "last": v.index[-1]})
+            if abs(gor.iloc[-1] / gor.iloc[0] - 1) >= 0.10:
+                rows.append({"well": w, "type": "gor_drift", "severity": "warn", "from": float(gor.iloc[0]), "to": float(gor.iloc[-1]),
+                             "first": v.index[0], "last": v.index[-1]})
+            if dq - 1 <= -0.20:
+                rows.append({"well": w, "type": "oil_decline", "severity": "alert", "change_pct": float((dq - 1) * 100), "first": v.index[0], "last": v.index[-1]})
+    order = {"alert": 0, "warn": 1, "info": 2}
+    rows.sort(key=lambda r: (order[r["severity"]], r["well"]))
+    return ok({"rows": rows, "well_days": int(len(P)), "rules": {"critical_y": Y_CRIT, "water_cut_pp": 5, "gor_pct": 10, "oil_decline_pct": 20, "partial_uptime": 0.95}})
 
 
 @app.get("/api/summary")

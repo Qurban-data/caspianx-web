@@ -10,6 +10,21 @@
 <script src="/static/vendor/plotly.min.js"></script>
 </head>
 <body>
+<div id="login" class="login">
+  <div class="login-card">
+    <div class="login-brand"><img src="/static/img/socar_logo.png" alt="SOCAR"><span class="sep"></span><img src="/static/img/caspian_ai_logo.png" alt="Caspian AI Institute"></div>
+    <div class="word big">Caspian<span>X</span></div>
+    <p class="login-sub">Well intelligence platform · VFM and PTA</p>
+    <form id="loginForm" autocomplete="on">
+      <label>Username<input id="lgUser" name="username" type="text" autocomplete="username" required></label>
+      <label>Password<input id="lgPass" name="password" type="password" autocomplete="current-password" required></label>
+      <div class="login-err" id="lgErr"></div>
+      <button class="btn primary" type="submit">Sign in</button>
+      <button class="btn" type="button" id="lgJury">Quick jury access</button>
+    </form>
+    <div class="seg" id="langSegLogin"><button data-lang="az">AZ</button><button data-lang="en">EN</button></div>
+  </div>
+</div>
 <header class="top">
   <div class="brand">
     <img src="/static/img/socar_logo.png" alt="SOCAR"><span class="sep"></span>
@@ -21,6 +36,9 @@
     <span id="dsBadge" class="badge none">NO DATA</span>
     <div class="seg" id="langSeg"><button data-lang="az" class="on">AZ</button><button data-lang="en">EN</button></div>
     <button id="btnCopilot" class="btn-notes">Copilot</button>
+    <div class="profile"><button id="btnUser" class="btn-notes"><span id="userName">–</span></button>
+      <div class="menu" id="userMenu"><div class="who"><b id="umName"></b><span id="umRole"></span></div>
+        <button id="umSettings">Settings</button><button id="umOut">Sign out</button></div></div>
     <button id="btnNotes" class="btn-notes" title="Engineering notes and input check">Notes <span id="notesCnt" class="cnt zero">0</span></button>
   </div>
 </header>
@@ -63,7 +81,8 @@
         <button data-tab="meas"><span class="step">03</span>Measurements</button>
         <button data-tab="vfm"><span class="step">04</span>VFM &amp; Predictions</button>
         <button data-tab="pta"><span class="step">05</span>PTA &amp; Reservoir</button>
-        <button data-tab="proof"><span class="step">06</span>Model proof</button>
+        <button data-tab="anom"><span class="step">06</span>AI anomaly detection</button>
+        <button data-tab="proof"><span class="step">07</span>Model proof</button>
       </nav>
       <div class="tools"><span class="label">Period</span>
         <div class="seg months" id="rangeSeg"><button data-r="all" class="on">Whole period</button></div>
@@ -153,6 +172,14 @@
         <div class="hd" style="margin-top:14px"><h3>Engineer alerts</h3><span class="label" id="alertCount"></span></div>
         <div class="tablewrap"><table id="alertTable"></table></div></div>
     </section>
+    <section id="tab-anom" class="tab">
+      <div class="context"><div><h1>AI anomaly detection</h1>
+        <div class="sub">Rule-based surveillance of every well-day: shut-ins, sensor gaps, critical choke flow, water-cut and GOR drift · <span id="anomScope"></span></div></div></div>
+      <div class="kpis" id="anomKpis"></div>
+      <div class="panel"><div class="hd"><h3>Detected anomalies</h3><span class="label">click a row to open the well</span></div>
+        <div class="tablewrap"><table id="anomTable"></table></div><p class="note" id="anomNote"></p></div>
+    </section>
+
     <section id="tab-proof" class="tab">
       <div class="context"><div><h1>Model proof</h1>
         <div class="sub">Pure physics vs pure ML vs the submitted hybrid on the same frozen validation · <span id="proofProto"></span></div></div></div>
@@ -181,9 +208,21 @@
   <div class="hd"><span class="label">Engineering notes</span><button class="x" id="drawerX">Close</button></div>
   <div class="bd" id="drawerBody"></div>
 </aside>
+<aside class="drawer" id="settings">
+  <div class="hd"><span class="label">Settings</span><button class="x" id="settingsX">Close</button></div>
+  <div class="bd set">
+    <div class="row"><span>Signed in as</span><b id="setUser"></b></div>
+    <div class="row"><span>Language</span><div class="seg" id="langSegSet"><button data-lang="az">AZ</button><button data-lang="en">EN</button></div></div>
+    <div class="row"><span>Theme</span><div class="seg" id="themeSeg"><button data-theme="dark">Dark</button><button data-theme="light">Light</button></div></div>
+    <div class="row"><span>Oil price, $/bbl</span><input id="setPrice" type="number" min="1" max="300" step="1"></div>
+    <div class="row"><span>Skin alert threshold</span><input id="setSkin" type="number" min="0" max="20" step="0.5"></div>
+    <div class="row"><span>Export</span><div class="grid2"><button class="btn" data-exp="vfm_csv">VFM CSV</button><button class="btn" data-exp="pta_csv">PTA CSV</button><button class="btn" data-exp="xlsx">Excel</button><button class="btn" data-exp="report_html">Report</button></div></div>
+    <div class="row"><span></span><button class="btn" id="setOut">Sign out</button></div>
+  </div>
+</aside>
 <aside class="drawer" id="copilot">
   <div class="hd"><span class="label">Well copilot · answers from computed results only</span><button class="x" id="copilotX">Close</button></div>
-  <div class="bd"><div id="copilotQ" class="cq"></div><div id="copilotA" class="ca"></div></div>
+  <div class="bd"><form id="copilotForm" class="cform"><input id="copilotText" type="text" placeholder="Ask about the model, wells or data"><button class="btn" type="submit">Ask</button></form><div id="copilotQ" class="cq"></div><div id="copilotA" class="ca"></div></div>
 </aside>
 <div class="toast" id="toast"></div>
 <script src="/static/i18n.js"></script>

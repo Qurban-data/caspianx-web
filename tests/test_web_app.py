@@ -15,6 +15,9 @@ from web_app.main import app, model  # noqa: E402
 import web_app.demo_data as demo     # noqa: E402
 
 client = TestClient(app)
+ENGINEER = {"username": "qurban", "password": "caspianx2026"}      # demo accounts of the app (stored hashed in web_app/main.py)
+JURY = {"username": "jury", "password": "socar2026"}
+assert client.post("/api/auth/login", data=ENGINEER).status_code == 200
 
 
 def _check(r):
@@ -157,3 +160,32 @@ def test_model_proof_what_if_and_copilot():
         for lang in ("en", "az"):
             a = _check(client.get(f"/api/copilot?q={q}&sid={j['sid']}&lang={lang}"))
             assert a["lines"] and all(isinstance(x, str) and x for x in a["lines"])
+
+
+def test_sign_in_sign_out_and_protected_routes():
+    c = TestClient(app)
+    assert c.get("/api/health").status_code == 200                                   # health stays open
+    assert c.get("/api/auth/me").status_code == 401
+    assert c.post("/api/demo").status_code == 401 and c.get("/api/model-proof").status_code == 401
+    r = c.post("/api/auth/login", data={"username": "jury", "password": "wrong"})
+    assert r.status_code == 401 and r.json()["ok"] is False and "cx_session" not in c.cookies
+    assert c.post("/api/auth/login", data={"username": "nobody", "password": "x"}).status_code == 401
+    j = _check(c.post("/api/auth/login", data=JURY))
+    assert j["role"] == "jury" and _check(c.get("/api/auth/me"))["user"] == "jury"
+    assert c.post("/api/demo").status_code == 200
+    c.cookies.set("cx_session", "jury.9999999999.forged")
+    assert c.get("/api/auth/me").status_code == 401                                  # forged cookie is rejected
+    c.cookies.clear()
+    _check(c.post("/api/auth/jury"))                                                 # one-click evaluator access
+    assert _check(c.get("/api/auth/me"))["role"] == "jury"
+    _check(c.post("/api/auth/logout"))
+    assert c.get("/api/auth/me").status_code == 401 and c.post("/api/demo").status_code == 401
+
+
+def test_anomalies_and_typed_copilot():
+    j = _check(client.post("/api/demo"))
+    a = _check(client.get(f"/api/anomalies?sid={j['sid']}"))
+    assert a["well_days"] > 0 and all(r["severity"] in ("alert", "warn", "info") for r in a["rows"])
+    for text, lang in (("which well needs stimulation", "en"), ("çatışmayan sensor datası", "az"), ("zzzz", "en")):
+        r = _check(client.get("/api/copilot", params={"text": text, "sid": j["sid"], "lang": lang}))
+        assert r["lines"]

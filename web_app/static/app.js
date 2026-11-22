@@ -44,8 +44,32 @@ async function api(path, opts, retried) {
     await resync(); return api(path.replace(/sid=[^&]+/, "sid=" + S.sid), opts, true);
   }
   let j; try { j = await r.json(); } catch (e) { throw new Error(`HTTP ${r.status}: the server returned a non-JSON response`); }
+  if (r.status === 401 && j.auth_required) { showLogin(); throw new Error(T("Sign in required.")); }
   if (!r.ok || j.ok === false) throw new Error(j.error || j.detail || `HTTP ${r.status}`);
   return j;
+}
+// ------------------------------------------------------------------ sign in, profile, settings, theme
+const PAL = { dark: { ink: "#ffffff", muted: "rgba(255,255,255,0.66)", dim: "rgba(255,255,255,0.44)", grid: "rgba(255,255,255,0.07)", line: "rgba(255,255,255,0.16)", bg: "#0d1314", bg2: "#0a1011", gas: "#a8d8ff", teal2: "#9cc3cc", sand: "#ffe2a3", gold: "#ffc861" },
+  light: { ink: "#0e1a1d", muted: "rgba(14,26,29,0.70)", dim: "rgba(14,26,29,0.50)", grid: "rgba(10,20,25,0.08)", line: "rgba(10,20,25,0.22)", bg: "#ffffff", bg2: "#f7f9fa", gas: "#2a9bd6", teal2: "#236877", sand: "#a8741a", gold: "#b07a12" } };
+const store = { get(k, d) { try { return localStorage.getItem(k) ?? d; } catch (e) { return d; } }, set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* unavailable */ } } };
+function setTheme(t, rerender) {
+  S.theme = t; document.documentElement.dataset.theme = t; Object.assign(C, PAL[t]); store.set("cx_theme", t);
+  $$("#themeSeg button").forEach((b) => b.classList.toggle("on", b.dataset.theme === t));
+  if (rerender && S.sid) renderAll();
+}
+function renderAll() { buildRange(); return Promise.all([overview(), measurements(), vfm(), monthly(), proof(), anomalies()]).then(() => pta()).catch((e) => toast(e.message)); }
+function showLogin(msg) { $("#login").classList.add("show"); $("#lgErr").textContent = msg || ""; }
+function signedIn(u) {
+  S.user = u; $("#login").classList.remove("show"); $("#userName").textContent = u.name; $("#umName").textContent = u.name; $("#umRole").textContent = u.role; $("#setUser").textContent = `${u.name} · ${u.role}`;
+  if (!S.sid) boot();
+}
+async function signOut() {
+  try { await fetch("/api/auth/logout", { method: "POST" }); } catch (e) { /* offline */ }
+  S.sid = null; S.source = null; $("#userMenu").classList.remove("open"); $("#settings").classList.remove("open"); $("#lgPass").value = ""; showLogin();
+}
+async function authStart() {
+  try { const r = await fetch("/api/auth/me"); const j = await r.json(); if (r.ok && j.ok) return signedIn(j); $("#lgJury").style.display = j.jury_quick === false ? "none" : ""; } catch (e) { /* server down: the form reports it */ }
+  showLogin();
 }
 function dayShapes(days, color, opacity = 0.2) {
   return (days || []).map((d) => ({ type: "rect", xref: "x", yref: "paper", x0: d + "T00:00", x1: d + "T23:59", y0: 0, y1: 1, fillcolor: color, opacity, line: { width: 0 }, layer: "below" }));
@@ -149,7 +173,7 @@ async function apply(j) {
   const [m, p, it] = await Promise.all([S.model || api("/api/model"), api(`/api/pta?sid=${S.sid}`), api(`/api/interpret?sid=${S.sid}`)]);
   S.model = m; S.pta = p.events; S.interp = it;
   progress(null, `${j.dataset_kind === "DEMO" ? "Demo" : "Field data"} loaded · ${j.wells.length} wells · ${j.n_buildups} build-ups`);
-  await Promise.all([overview(), measurements(), vfm(), monthly(), proof()]);
+  await Promise.all([overview(), measurements(), vfm(), monthly(), proof(), anomalies()]);
   pta();
 }
 function header() {
@@ -333,6 +357,25 @@ async function proof() {
     d.missing.map((m) => `<tr><td>${esc(m.sensor)}</td><td class="n">${fmt(m.test_missing_pct, 1)}</td><td class="n ${m.prod_missing_pct > 10 ? "c-red" : ""}">${fmt(m.prod_missing_pct, 2)}</td><td class="n">${m.prod_missing_days}</td>
       <td style="white-space:normal;color:var(--muted)">${T(m.prod_missing_pct >= 99 ? "not a model input (test days only)" : m.prod_missing_days ? "carried forward within the well, row flagged" : "complete")}</td></tr>`).join("");
   $("#proofMissNote").textContent = `${d.imputed_production_rows} / ${d.production_rows} ` + T("production well-days had a sensor gap.") + ` P_ds/WHP: ${fmt(d.regime_shift.test_median_pds_over_whp, 3)} (${T("tests")}) → ${fmt(d.regime_shift.prod_median_pds_over_whp, 3)} (${T("production")}).`;
+}
+
+// ------------------------------------------------------------------ anomaly detection
+const ANOM = { shut_in: "Shut-in", partial_uptime: "Partial uptime", sensor_gap: "Sensor gap", critical_choke: "Critical choke flow", water_cut_drift: "Water-cut drift", gor_drift: "GOR drift", oil_decline: "Oil decline" };
+async function anomalies() {
+  const a = await api(`/api/anomalies?sid=${S.sid}`); const R = a.rows;
+  $("#anomScope").textContent = `${fmt(a.well_days)} ${T("well-days")}`;
+  const cnt = (t) => R.filter((r) => r.type === t).length;
+  $("#anomKpis").innerHTML = [["red", "Oil decline", cnt("oil_decline")], ["water", "Water-cut drift", cnt("water_cut_drift")], ["gas", "GOR drift", cnt("gor_drift")], ["gold", "Shut-in", cnt("shut_in")], ["teal", "Sensor gap", cnt("sensor_gap")], ["teal", "Critical choke flow", cnt("critical_choke")]]
+    .map(([c, l, v]) => `<div class="kpi"><div class="label"><span class="dot" style="background:var(--${c})"></span>${l}</div><div class="v">${v}</div><div class="u">wells</div></div>`).join("");
+  const det = (r) => r.type === "oil_decline" ? `${sgn(r.change_pct, 1)} % · ${monthLabel(r.first, true)} → ${monthLabel(r.last, true)}`
+    : r.type === "water_cut_drift" ? `${fmt(r.from, 1)} → ${fmt(r.to, 1)} % · ${monthLabel(r.first, true)} → ${monthLabel(r.last, true)}`
+    : r.type === "gor_drift" ? `${fmt(r.from)} → ${fmt(r.to)} scf/STB · ${monthLabel(r.first, true)} → ${monthLabel(r.last, true)}`
+    : r.type === "critical_choke" ? `${r.days} ${T("Days").toLowerCase()} (${fmt(r.share_pct, 0)} %) · P_ds/WHP ${fmt(r.value, 3)} ≤ ${a.rules.critical_y}`
+    : `${r.days} ${T("Days").toLowerCase()} · ${r.first}${r.last !== r.first ? " → " + r.last : ""}`;
+  $("#anomTable").innerHTML = `<tr><th>Severity</th><th>Well</th><th>Type</th><th>Detail</th></tr>` +
+    (R.map((r) => `<tr class="click" data-w="${esc(r.well)}" data-t="${r.type}"><td><span class="sev ${r.severity}">${r.severity}</span></td><td class="mono">${esc(r.well)}</td><td>${ANOM[r.type] || r.type}</td><td class="mono" style="color:var(--muted)">${det(r)}</td></tr>`).join("") || `<tr><td class="c-dim" colspan="4">No alerts.</td></tr>`);
+  $$("#anomTable tr.click").forEach((x) => x.addEventListener("click", () => { if (S.wells.includes(x.dataset.w)) { setWell(x.dataset.w); tab(["shut_in", "partial_uptime", "sensor_gap", "critical_choke"].includes(x.dataset.t) ? "meas" : "vfm"); } }));
+  $("#anomNote").textContent = T("Rules") + `: P_ds/WHP ≤ ${a.rules.critical_y}; ${T("Water-cut drift")} ≥ ${a.rules.water_cut_pp} pp; ${T("GOR drift")} ≥ ${a.rules.gor_pct} %; ${T("Oil decline")} ≥ ${a.rules.oil_decline_pct} % (${T("first vs last month")}).`;
 }
 
 // ------------------------------------------------------------------ what-if simulator
@@ -565,7 +608,7 @@ function wellTable() {
   $("#wellTable").innerHTML = `<tr>${cols.map(([c, l, al]) => `<th class="${al} sortable" data-k="${c}">${l}${k === c ? (d > 0 ? " ▲" : " ▼") : ""}</th>`).join("")}</tr>` +
     rows.map((r) => `<tr class="click ${r.well === S.well ? "sel" : ""}" data-w="${esc(r.well)}" data-ev="${r.event_id ?? ""}">${cols.map(([c, , al, dec, signed]) => {
       let v = r[c]; let cls = al;
-      if (al === "n") { if (c === "erosional_ratio" && isNum(v) && v >= 0.8) cls += " c-red"; if (c === "skin" && isNum(v) && v >= 2) cls += " c-gold"; v = (v === null || v === undefined) ? "–" : (signed ? sgn(v, dec) : fmt(v, dec)); }
+      if (al === "n") { if (c === "erosional_ratio" && isNum(v) && v >= 0.8) cls += " c-red"; if (c === "skin" && isNum(v) && v >= (S.skinThr ?? 2)) cls += " c-gold"; v = (v === null || v === undefined) ? "–" : (signed ? sgn(v, dec) : fmt(v, dec)); }
       else v = esc(v ?? "–");
       return `<td class="${cls}">${v}</td>`;
     }).join("")}</tr>`).join("");
@@ -640,8 +683,30 @@ function setLang(l) {
   $$("#langSeg button").forEach((x) => x.classList.toggle("on", x.dataset.lang === l));
   trAll();
   $("#copilot").classList.remove("open");
-  if (S.sid) { buildRange(); Promise.all([overview(), measurements(), vfm(), monthly(), proof()]).then(() => pta()).catch((e) => toast(e.message)); }
+  $$("#langSegLogin button, #langSegSet button").forEach((x) => x.classList.toggle("on", x.dataset.lang === l));
+  if (S.sid) renderAll();
 }
-$$("#langSeg button").forEach((x) => x.classList.toggle("on", x.dataset.lang === I18N.lang)); trAll();
-boot();
-api("/api/health").then((h) => { if (!h.model_loaded) toast("Model file missing: web_app/models/vfm_model_FINAL.pkl"); }).catch((e) => toast(e.message));
+$$("#langSeg button, #langSegLogin button, #langSegSet button").forEach((x) => x.classList.toggle("on", x.dataset.lang === I18N.lang)); trAll();
+$$("#langSegLogin button, #langSegSet button").forEach((b) => b.addEventListener("click", () => setLang(b.dataset.lang)));
+$$("#themeSeg button").forEach((b) => b.addEventListener("click", () => setTheme(b.dataset.theme, true)));
+$("#loginForm").addEventListener("submit", async (e) => { e.preventDefault(); $("#lgErr").textContent = "";
+  try { const r = await fetch("/api/auth/login", { method: "POST", body: new FormData(e.target) }); const j = await r.json();
+    if (r.ok && j.ok) signedIn(j); else $("#lgErr").textContent = T(j.error || "Wrong username or password."); }
+  catch (err) { $("#lgErr").textContent = netError(err); } });
+$("#lgJury").addEventListener("click", async () => { try { const r = await fetch("/api/auth/jury", { method: "POST" }); const j = await r.json(); if (r.ok && j.ok) signedIn(j); else $("#lgErr").textContent = T(j.detail || j.error || "Quick jury access is disabled."); } catch (err) { $("#lgErr").textContent = netError(err); } });
+$("#btnUser").addEventListener("click", (e) => { e.stopPropagation(); $("#userMenu").classList.toggle("open"); });
+document.addEventListener("click", () => $("#userMenu").classList.remove("open"));
+const openSettings = () => { $("#settings").classList.add("open"); $("#copilot").classList.remove("open"); $("#drawer").classList.remove("open"); };
+$("#umSettings").addEventListener("click", openSettings); $("#settingsX").addEventListener("click", () => $("#settings").classList.remove("open"));
+$("#umOut").addEventListener("click", signOut); $("#setOut").addEventListener("click", signOut);
+S.skinThr = +store.get("cx_skin", "2"); $("#setSkin").value = S.skinThr; $("#setPrice").value = store.get("cx_price", "70"); $("#oilPrice").value = $("#setPrice").value;
+$("#setPrice").addEventListener("input", (e) => { $("#oilPrice").value = e.target.value; store.set("cx_price", e.target.value); roi(); });
+$("#oilPrice").addEventListener("input", (e) => { $("#setPrice").value = e.target.value; store.set("cx_price", e.target.value); });
+$("#setSkin").addEventListener("input", (e) => { S.skinThr = +e.target.value || 0; store.set("cx_skin", String(S.skinThr)); if (S.sid) wellTable(); });
+$("#copilotForm").addEventListener("submit", async (e) => { e.preventDefault(); const t = $("#copilotText").value.trim(); if (!t) return;
+  try { const a = await api(`/api/copilot?text=${encodeURIComponent(t)}&sid=${S.sid || ""}&lang=${I18N.lang}`);
+    $("#copilotA").innerHTML = `<b>${esc(a.question)}</b><ul>${a.lines.map((l) => `<li>${esc(l)}</li>`).join("")}</ul><div class="src">${T("Source")}: ${esc(a.source)}</div>`; }
+  catch (err) { $("#copilotA").textContent = err.message; } });
+setTheme(store.get("cx_theme", "dark"), false);
+authStart();
+fetch("/api/health").then((r) => r.json()).then((h) => { if (!h.model_loaded) toast("Model file missing: web_app/models/vfm_model_FINAL.pkl"); }).catch((e) => toast(e.message));

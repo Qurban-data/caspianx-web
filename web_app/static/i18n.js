@@ -83,6 +83,14 @@ const AZ = {
   "Gain = theoretical oil rate if skin is removed at constant drawdown (upper bound, for ranking). Revenue = gain × 365 × oil price; intervention cost is not included.": "Artım = sabit depressiyada skin aradan qaldırılsa nəzəri neft debiti (yuxarı hədd, sıralama üçün). Gəlir = artım × 365 × neft qiyməti; müdaxilə xərci daxil deyil.",
   "Well copilot · answers from computed results only": "Quyu köməkçisi · yalnız hesablanmış nəticələrdən cavab", "No build-up with positive skin in the loaded data.": "Yüklənmiş datada müsbət skinli bərpa yoxdur.",
   "Validation summary is not available in this build.": "Validasiya xülasəsi bu versiyada yoxdur.",
+  "Username": "İstifadəçi adı", "Password": "Şifrə", "Sign in": "Daxil ol", "Sign out": "Çıxış", "Quick jury access": "Münsif üçün sürətli giriş", "Settings": "Tənzimləmələr",
+  "Well intelligence platform · VFM and PTA": "Quyu analitikası platforması · VFM və PTA", "Wrong username or password.": "İstifadəçi adı və ya şifrə səhvdir.", "Sign in required.": "Daxil olmaq tələb olunur.",
+  "Quick jury access is disabled.": "Sürətli münsif girişi söndürülüb.", "Signed in as": "Daxil olub", "Language": "Dil", "Theme": "Tema", "Dark": "Tünd", "Light": "Açıq", "Skin alert threshold": "Skin xəbərdarlıq həddi",
+  "engineer": "mühəndis", "jury": "münsif", "Jury evaluator": "Münsif", "AI anomaly detection": "AI anomaliya aşkarlaması",
+  "Rule-based surveillance of every well-day: shut-ins, sensor gaps, critical choke flow, water-cut and GOR drift ·": "Hər quyu-günün qayda əsaslı izlənməsi: bağlanmalar, sensor boşluqları, kritik ştuser axını, su payı və GOR sürüşməsi ·",
+  "Detected anomalies": "Aşkarlanmış anomaliyalar", "click a row to open the well": "quyunu açmaq üçün sətrə klikləyin", "well-days": "quyu-gün", "Partial uptime": "Qismən işləmə", "Sensor gap": "Sensor boşluğu",
+  "Critical choke flow": "Kritik ştuser axını", "Water-cut drift": "Su payının sürüşməsi", "GOR drift": "GOR sürüşməsi", "Oil decline": "Neft debitinin düşməsi", "Rules": "Qaydalar", "first vs last month": "ilk və son ay",
+  "Ask about the model, wells or data": "Model, quyular və ya data barədə soruşun", "Ask": "Soruş",
   "Generating synthetic demo field": "Sintetik demo yataq hazırlanır", "Loading field data": "Yataq datası yüklənir",
 };
 const AZ_RE = [
