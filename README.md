@@ -6,12 +6,17 @@ Virtual debit ölçmə (VFM), avtomatik təzyiq bərpası analizi (PTA) və müh
 
 ## Təhvil faylları (Deliverables)
 
-| # | Tələb | Yeri |
+| # | Tələb | Fayl |
 |---|---|---|
-| 1 | Phase 1 (VFM) və Phase 2 (PTA) nəticə faylları, CSV və Excel | VFM: `results/vfm_submission.csv` · `.xlsx`; **PTA (final): `results/pta_submission.csv` · `.xlsx`** (eyni fayl: `results/pta_submission_final.csv`); əvvəlki versiya: `results/archive/pta_submission_v1.csv` |
-| 2 | Təlim olunmuş model, `.pkl` | `models/vfm_model_FINAL.pkl` |
-| 3 | Kod və nəticələri olan, bütün xanaları işlədilmiş notebook | `notebook/CaspianX_Solution.ipynb` |
-| 4 | PTA qrafikləri qovluğu | `pta_plots/` (hər bərpa üçün log-log + Horner) |
+| 1 | Phase 1 (VFM) nəticəsi, CSV və Excel | [`results/vfm_submission.csv`](results/vfm_submission.csv) · [`.xlsx`](results/vfm_submission.xlsx) (2 730 quyu-gün, 10 quyu, 2025-01-01 → 2025-09-30) |
+| 1 | Phase 2 (PTA) nəticəsi, CSV və Excel | [`results/pta_submission.csv`](results/pta_submission.csv) · [`.xlsx`](results/pta_submission.xlsx) (6 bərpa: k, skin, Δp_skin, Horner meyli) |
+| 2 | Təlim olunmuş model, `.pkl` | [`models/vfm_model_FINAL.pkl`](models/vfm_model_FINAL.pkl) (tətbiqdəki nüsxə: `web_app/models/`) |
+| 3 | Bütün xanaları işlədilmiş notebook | [`notebook/CaspianX_Solution.ipynb`](notebook/CaspianX_Solution.ipynb) |
+| 4 | PTA qrafikləri | [`pta_plots/`](pta_plots/) (hər bərpa üçün log-log + Bourdet və Horner) |
+| – | Veb tətbiq (canlı) | https://caspianx-web-q725.vercel.app/ · kod: [`web_app/`](web_app/) |
+| – | Təqdimat | [`presentation/CaspianX_Teqdimat.pdf`](presentation/CaspianX_Teqdimat.pdf) · [`.pptx`](presentation/CaspianX_Teqdimat.pptx) |
+
+PTA-nın əvvəlki versiyası arxivdədir: `results/archive/`.
 
 ## Tətbiq
 
