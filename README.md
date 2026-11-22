@@ -8,7 +8,7 @@ Virtual debit ölçmə (VFM), avtomatik təzyiq bərpası analizi (PTA) və müh
 
 | # | Tələb | Yeri |
 |---|---|---|
-| 1 | Phase 1 (VFM) və Phase 2 (PTA) nəticə faylları, CSV və Excel | VFM: `results/vfm_submission.csv` · `.xlsx`; **PTA (final, portala təqdim edilən): `results/pta_submission_final.csv` · `.xlsx`**; əvvəlki PTA versiyası: `results/pta_submission.csv` · `.xlsx` (dəyişdirilməyib) |
+| 1 | Phase 1 (VFM) və Phase 2 (PTA) nəticə faylları, CSV və Excel | VFM: `results/vfm_submission.csv` · `.xlsx`; **PTA (final): `results/pta_submission.csv` · `.xlsx`** (eyni fayl: `results/pta_submission_final.csv`); əvvəlki versiya: `results/archive/pta_submission_v1.csv` |
 | 2 | Təlim olunmuş model, `.pkl` | `models/vfm_model_FINAL.pkl` |
 | 3 | Kod və nəticələri olan, bütün xanaları işlədilmiş notebook | `notebook/CaspianX_Solution.ipynb` |
 | 4 | PTA qrafikləri qovluğu | `pta_plots/` (hər bərpa üçün log-log + Horner) |

@@ -786,10 +786,10 @@ function tab(name) {
   window.scrollTo({ top: 0 });
 }
 function setWell(w, redrawPta = true) {
-  S.well = w; $("#well").value = w; syncUrl(); copilotCtx();
+  // choosing a well switches the overview and the monthly view to that well, so every number follows the selection
+  S.well = w; $("#well").value = w; S.scope = "well"; S.monScope = "well"; syncUrl(); copilotCtx();
   const own = S.pta.filter((e) => e.well === w); if (own.length) S.ev = own[0].id;
-  const p = [measurements(), vfm()]; if (S.scope === "well") p.push(overview()); else queue(true);
-  if (S.monScope === "well") p.push(monthly());
+  const p = [measurements(), vfm(), overview(), monthly()];
   run(p);
   if (redrawPta) pta();
 }
