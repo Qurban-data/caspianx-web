@@ -1,0 +1,17 @@
+{
+ "kind": "synthetic demo data (not field data)",
+ "seed": 2026,
+ "period": [
+  "2025-01-01",
+  "2025-09-30"
+ ],
+ "files": [
+  "daily_features.csv",
+  "choke_events.csv",
+  "reservoir_pvt.csv",
+  "well_completion.csv",
+  "GL-01_2025-03-18.json",
+  "GL-04_2025-05-20.json",
+  "GL-03_2025-08-12.json"
+ ]
+}

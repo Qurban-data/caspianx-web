@@ -15,7 +15,7 @@ Then open http://localhost:8000. To share it temporarily: `cloudflared tunnel --
 | Deliverable | Endpoint |
 |---|---|
 | 1. Upload (CSV / Excel / ZIP / event JSON, drag and drop) | `POST /api/upload` (multipart `files`) |
-| 1. Demo data | `POST /api/demo` (synthetic field, not field data) |
+| 1. Demo data | `POST /api/demo` (synthetic Jan–Sep 2025 field, not field data; fixed session id `demo`) |
 | 2. Field measurements | `GET /api/measurements?sid=&well=` |
 | 3. Daily oil / water / gas + P10–P90 | `GET /api/vfm?sid=&well=` (`well=ALL` for the field) |
 | 4. PTA plots: log-log + Bourdet, Horner, MDH, Cartesian | `GET /api/pta?sid=` |
@@ -23,6 +23,8 @@ Then open http://localhost:8000. To share it temporarily: `cloudflared tunnel --
 | 6. Interpretation, intervention priority, alerts | `GET /api/interpret?sid=&oil_price=` |
 | 7. Exports | `GET /api/export/{vfm_csv,pta_csv,xlsx,report_html}?sid=` |
 
+Period: `monthly`, `anomalies`, `copilot` and every `export` accept `d0` / `d1` (YYYY-MM-DD, inclusive).
+Copilot: `GET /api/copilot?text=&sid=&lang=&well=&d0=&d1=` (parsed question, answer from computed tables only).
 There are also `GET /api/health` and `GET /api/docs` (OpenAPI).
 
 Smoke test: `python -m pytest tests/test_web_app.py -q`.

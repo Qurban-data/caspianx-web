@@ -50,6 +50,8 @@ RATES = {"oil": "oil_rate_stbd", "water": "water_rate_stbd", "gas": "gas_rate_ms
 MODEL_PATH = BASE / "models" / "vfm_model_FINAL.pkl"
 CARD_PATH = BASE / "models" / "metrics_card.json"
 MAX_SESSIONS = 8
+DEMO_SID = "demo"                      # fixed id: any server instance can rebuild the seeded demo, so it never expires
+DEMO_SOURCE = "synthetic demo field (not field data)"
 
 app = FastAPI(title="CaspianX Well Intelligence", version="5.0", docs_url="/api/docs", redoc_url=None)
 app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
@@ -58,6 +60,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)   # plotly.min.js 4.8 MB -
 _MODEL = None
 _LOCK = threading.Lock()
 _DEF_LOCK = threading.Lock()
+_DEMO_LOCK = threading.Lock()
 SESSIONS: "OrderedDict[str, dict]" = OrderedDict()
 
 
@@ -143,7 +146,8 @@ def auth_logout():
 def auth_me(request: Request):
     u = _user_from(request)
     if u is None:
-        return JSONResponse({"ok": False, "auth_required": True, "jury_quick": JURY_QUICK}, status_code=401)
+        # 200 with ok = false: "not signed in yet" is a normal state on first visit, not a browser-console error
+        return JSONResponse({"ok": False, "auth_required": True, "jury_quick": JURY_QUICK})
     return ok({"user": u, "name": USERS[u]["name"], "role": USERS[u]["role"]})
 
 
@@ -220,12 +224,56 @@ def ok(payload: dict) -> JSONResponse:
     return JSONResponse(clean({"ok": True, **payload}))
 
 
+def _load_demo() -> dict:
+    """The synthetic demo session. It is deterministic (seeded generator / committed static files), so a serverless
+    instance that never saw it builds the same session on first use instead of answering 404."""
+    if DEMO_SID in SESSIONS:
+        return SESSIONS[DEMO_SID]
+    with _DEMO_LOCK:
+        if DEMO_SID not in SESSIONS:
+            run_pipeline(demo_data.build(model()), DEMO_SOURCE, sid=DEMO_SID)
+    return SESSIONS[DEMO_SID]
+
+
 def session(sid: str) -> dict:
-    s = SESSIONS.get(sid) or _load_default(sid)
+    s = SESSIONS.get(sid) or (_load_demo() if sid == DEMO_SID else _load_default(sid))
     if s is None:
         raise HTTPException(404, "Session not found or expired: load data again (Upload or Load demo).")
     SESSIONS.move_to_end(sid)
     return s
+
+
+def _day(x: str | None):
+    """'YYYY-MM-DD' -> Timestamp, anything else -> None (a bad value never breaks a request)."""
+    try:
+        return pd.Timestamp(x).normalize() if x else None
+    except Exception:
+        return None
+
+
+def clip(df: pd.DataFrame, d0: str | None, d1: str | None, col: str = "date") -> pd.DataFrame:
+    """Rows of the selected period [d0, d1] (inclusive); an unset bound is open."""
+    a, b = _day(d0), _day(d1)
+    if a is None and b is None:
+        return df
+    t = pd.to_datetime(df[col])
+    m = pd.Series(True, index=df.index)
+    if a is not None:
+        m &= t >= a
+    if b is not None:
+        m &= t < b + pd.Timedelta(days=1)
+    return df[m]
+
+
+def daily_tables(s: dict, d0: str | None = None, d1: str | None = None):
+    """(V, P): submitted blend rates and the sensor / model-A table, dates parsed, limited to the period."""
+    V = clip(s["R"]["Bl"].assign(date=lambda d: pd.to_datetime(d.date)), d0, d1)
+    P = clip(s["R"]["P"].assign(date=lambda d: pd.to_datetime(d.date)), d0, d1)
+    return V, P
+
+
+def month_complete(month: str, days: int) -> bool:
+    return int(days) >= int(pd.Period(month).days_in_month)
 
 
 JOBS: dict = {}
@@ -241,7 +289,7 @@ def _evict(sid: str, s: dict) -> None:
         shutil.rmtree(d, ignore_errors=True)
 
 
-def run_pipeline(files: list, source: str, progress=None, work_dir: str | None = None) -> dict:
+def run_pipeline(files: list, source: str, progress=None, work_dir: str | None = None, sid: str | None = None) -> dict:
     step = progress or (lambda msg: None)
     m = model()
     step("reading and validating files" + (" (per-minute file is aggregated in chunks)" if any(isinstance(b, str) for _, b in files) else ""))
@@ -253,11 +301,12 @@ def run_pipeline(files: list, source: str, progress=None, work_dir: str | None =
     R = AP.run(I["tables"], series, m.a, m.b)
     if getattr(AP.event_series, "last_error", None):
         R["warnings"].append(AP.event_series.last_error)
-    sid = uuid.uuid4().hex
+    sid = sid or uuid.uuid4().hex
+    keep = (_default_sid(ACCESS_CODE), DEMO_SID)            # bundled field session and the demo are never evicted
     with _LOCK:
         SESSIONS[sid] = {"I": I, "R": R, "source": source, "t": time.time(), "dir": work_dir}
-        while len(SESSIONS) > MAX_SESSIONS:
-            old = next(k for k in SESSIONS if k != _default_sid(ACCESS_CODE))   # bundled field session is never evicted
+        while len([k for k in SESSIONS if k not in keep]) > MAX_SESSIONS:
+            old = next(k for k in SESSIONS if k not in keep)
             _evict(old, SESSIONS.pop(old))
     return {"sid": sid, **summary(SESSIONS[sid])}
 
@@ -347,6 +396,8 @@ def summary(s: dict) -> dict:
                         "wells_flowing": int((last[[RATES[p] for p in PH]].sum(axis=1) > 0).sum()),
                         "n_alerts": int(sum(1 for a in al if a.get("severity") in ("alert", "warn")))},
             "period": [V.date.min().strftime("%Y-%m-%d"), V.date.max().strftime("%Y-%m-%d")], "well_days": int(len(V)),
+            "months": [{"month": m, "days": int(n), "complete": month_complete(m, n)}
+                       for m, n in V.groupby(V.date.dt.to_period("M").astype(str)).date.nunique().items()],
             "n_buildups": len(R["pta"]), "vfm_source": R.get("vfm_src"),
             "field_last_day": {ph: float(last[RATES[ph]].sum()) for ph in PH},
             "train_period": [str(pd.Timestamp(per.get("train_first")).date()) if per.get("train_first") is not None else None,
@@ -404,11 +455,21 @@ def alerts_table(R: dict) -> list[dict]:
         return [{"severity": "info", "well": "-", "type": "alerts", "message": f"alerts unavailable: {ex}"}]
 
 
-def report_html(s: dict) -> str:
+def report_html(s: dict, d0: str | None = None, d1: str | None = None, notes: list | None = None) -> str:
     R = s["R"]
     sm = summary(s)
-    V = blend_with_band(R)
+    V = clip(blend_with_band(R), d0, d1)
+    if V.empty:
+        raise HTTPException(404, "No data in the selected period.")
+    sm["period"] = [V.date.min().strftime("%Y-%m-%d"), V.date.max().strftime("%Y-%m-%d")]
+    sm["well_days"] = int(len(V))
     last = V[V.date == V.date.max()]
+    f_ = {ph: float(last[RATES[ph]].sum()) for ph in PH}
+    demo_note = ("<div class='ev'><b>Synthetic demo data.</b> Every number below comes from a generated demo field, "
+                 "not from field measurements.</div>") if sm["dataset_kind"] == "DEMO" else ""
+    nt = "".join(f"<div class='ev'><b>{html.escape(str(n.get('q', '')))}</b><ul>"
+                 + "".join(f"<li>{html.escape(str(l))}</li>" for l in (n.get('lines') or [])[:20])
+                 + f"</ul><div class='mut'>{html.escape(str(n.get('source', '')))}</div></div>" for n in (notes or [])[:30])
     logos = ""
     for f in ["socar_logo.png", "caspian_ai_logo.png"]:
         p = BASE / "static" / "img" / f
@@ -424,7 +485,7 @@ def report_html(s: dict) -> str:
                  + "".join(f"<li>{html.escape(str(l))}</li>" for l in (r.get('interp') or {}).get('lines', [])) + "</ul></div>"
                  for r, _ in R["pta"])
     warn = "".join(f"<li>{html.escape(w)}</li>" for w in R["warnings"])
-    f = sm["field_last_day"]
+    f = f_
     return f"""<!doctype html><html><head><meta charset='utf-8'><title>CaspianX engineering summary</title><style>
 body{{font-family:Archivo,Segoe UI,Arial,sans-serif;background:#07080b;color:#f6efe4;margin:0;padding:28px 36px;line-height:1.45}}
 h1{{font-size:22px;margin:12px 0 2px}}h2{{font-size:16px;color:#f2a446;border-bottom:1px solid rgba(255,206,140,.26);padding-bottom:4px;margin-top:26px}}
@@ -432,7 +493,7 @@ h1{{font-size:22px;margin:12px 0 2px}}h2{{font-size:16px;color:#f2a446;border-bo
 .k b{{font-size:20px;color:#f2a446}}table{{border-collapse:collapse;width:100%;font-size:13px}}td,th{{border:1px solid rgba(255,206,140,.14);padding:4px 8px;text-align:right}}
 td:first-child,th:first-child{{text-align:left}}th{{background:#1f160d}}.ev{{background:#120d08;border:1px solid rgba(255,206,140,.14);border-radius:6px;padding:8px 14px;margin:8px 0}}
 .mut{{color:#b3a38c;font-size:12px}}@media print{{body{{background:#fff;color:#111}}.k,.ev,th{{background:#f3f4f6}}td,th,.k,.ev{{border-color:#ccc}}}}
-</style></head><body>{logos}<h1>CaspianX · Well Intelligence engineering summary</h1>
+</style></head><body>{logos}<h1>CaspianX · Well Intelligence engineering summary</h1>{demo_note}
 <div class='mut'>Data: {html.escape(sm['source'])} · period {sm['period'][0]} to {sm['period'][1]} · {sm['well_days']} well-days ·
 {sm['n_buildups']} build-ups · model: {html.escape(sm['model']['name'])}</div>
 <h2>Field rates, last day</h2><div class='k'><b>{f['oil']:,.0f}</b> STB/d oil</div><div class='k'><b>{f['water']:,.0f}</b> STB/d water</div>
@@ -441,6 +502,7 @@ td:first-child,th:first-child{{text-align:left}}th{{background:#1f160d}}.ev{{bac
 <h2>Pressure-transient analysis (Horner, automatic Bourdet radial window)</h2>
 <table><tr><th>Well</th><th>Shut-in</th><th>k, md</th><th>Skin</th><th>m, psi/cycle</th><th>ΔP skin, psi</th><th>Interpretation</th></tr>{pt}</table>
 <h2>Interpretation</h2>{it or "<p class='mut'>No build-up in the loaded data.</p>"}
+{("<h2>Copilot findings added by the engineer</h2>" + nt) if nt else ""}
 <h2>Notes and warnings</h2><ul>{warn or '<li>none</li>'}</ul>
 <p class='mut'>Generated {pd.Timestamp.now():%Y-%m-%d %H:%M}. Use the browser's Print → Save as PDF for a PDF copy.</p></body></html>"""
 
@@ -515,7 +577,7 @@ def job(jid: str):
 
 @app.post("/api/demo")
 def demo():
-    return ok(run_pipeline(demo_data.build(model()), "synthetic demo field (not field data)"))
+    return ok({"sid": DEMO_SID, **summary(_load_demo())})
 
 
 @app.post("/api/default")
@@ -534,13 +596,14 @@ def default_dataset(code: str = Form("")):
 
 
 @app.get("/api/monthly")
-def monthly(sid: str, well: str = Query("ALL")):
+def monthly(sid: str, well: str = Query("ALL"), d0: str | None = None, d1: str | None = None):
     """Calendar-month aggregation of the submitted daily rates, month-over-month change, well x month matrix and the
     well x day oil surface. Everything is computed from the session's daily table."""
     s = session(sid)
-    V = s["R"]["Bl"].assign(date=lambda d: pd.to_datetime(d.date))
-    U = s["R"]["P"].assign(date=lambda d: pd.to_datetime(d.date))[["well_name", "date", "uptime"]]
-    V = V.merge(U, on=["well_name", "date"], how="left")
+    V, U = daily_tables(s, d0, d1)
+    if V.empty:
+        raise HTTPException(404, "No data in the selected period.")
+    V = V.merge(U[["well_name", "date", "uptime"]], on=["well_name", "date"], how="left")
     wells = sorted(V.well_name.unique())
     if well != "ALL":
         if well not in wells:
@@ -554,6 +617,7 @@ def monthly(sid: str, well: str = Query("ALL")):
         days = g.date.nunique()
         o, w, gs = (float(g[RATES[ph]].sum()) for ph in PH)
         rows.append({"month": m, "days": int(days), "days_in_month": int(pd.Period(m).days_in_month),
+                     "complete": month_complete(m, days),
                      "oil_stb": o, "water_stb": w, "gas_mscf": gs,
                      "oil_avg": o / days, "water_avg": w / days, "gas_avg": gs / days,
                      "wc_pct": w / (o + w) * 100 if o + w > 0 else None, "gor": gs * 1000 / o if o > 0 else None,
@@ -565,14 +629,23 @@ def monthly(sid: str, well: str = Query("ALL")):
         for k in ("wc_pct", "gor", "uptime_pct"):
             prev = rows[i - 1][k] if i else None
             r[k + "_mom"] = r[k] - prev if (prev is not None and r[k] is not None) else None
-    mean_all = {k: float(np.mean([r[k] for r in rows])) for k in ("oil_avg", "water_avg", "gas_avg")} if rows else {}
+    full = [r for r in rows if r["complete"]] or rows       # an incomplete month never sets the period average
+    mean_all = {k: float(np.mean([r[k] for r in full])) for k in ("oil_avg", "water_avg", "gas_avg")} if rows else {}
+    quarters = []
+    for qn, g in pd.DataFrame(rows).assign(q=[str(pd.Period(r["month"]).asfreq("Q")) for r in rows]).groupby("q"):
+        dd = int(g.days.sum())
+        quarters.append({"quarter": qn, "label": "Q" + qn[-1], "year": int(qn[:4]), "months": list(g.month),
+                         "complete": bool(len(g) == 3 and g.complete.all()), "days": dd,
+                         "oil_avg": float(g.oil_stb.sum() / dd), "water_avg": float(g.water_stb.sum() / dd),
+                         "gas_avg": float(g.gas_mscf.sum() / dd)})
     for r in rows:
         for k, v in mean_all.items():
             r[k + "_vs_mean_pct"] = (r[k] / v - 1) * 100 if v else None
     Vm = V.assign(month=V.date.dt.to_period("M").astype(str))
     piv = {ph: Vm.pivot_table(index="well_name", columns="month", values=RATES[ph], aggfunc="mean").reindex(wells) for ph in PH}
     daily = V.pivot_table(index="well_name", columns="date", values=RATES["oil"], aggfunc="sum").reindex(wells)
-    return ok({"well": well, "months": rows,
+    return ok({"well": well, "months": rows, "quarters": quarters,
+               "period": [V.date.min().strftime("%Y-%m-%d"), V.date.max().strftime("%Y-%m-%d")],
                "matrix": {"wells": wells, "months": list(piv["oil"].columns), **{ph: piv[ph].round(1).values for ph in PH}},
                "surface": {"wells": wells, "dates": [d.strftime("%Y-%m-%d") for d in daily.columns], "oil": daily.round(1).values},
                "cumulative": {"oil_stb": float(F[RATES["oil"]].sum()), "water_stb": float(F[RATES["water"]].sum()),
@@ -642,129 +715,33 @@ def what_if(sid: str, well: str, choke: float | None = None, whp: float | None =
                        "outside the tested range are extrapolation."})
 
 
-COPILOT_Q = {"hybrid": ("Why is the hybrid model better than pure physics and pure ML?", "Hibrid model niyə təmiz fizikadan və təmiz ML-dən yaxşıdır?"),
-             "overfit": ("How do you know the model is not overfitted?", "Modelin overfit olmadığını haradan bilirsiniz?"),
-             "stim": ("Which well needs stimulation first?", "Hansı quyu birinci stimulyasiya olunmalıdır?"),
-             "missing": ("How is missing sensor data handled?", "Çatışmayan sensor datası necə emal olunur?"),
-             "gas": ("Why is the gas error higher than the oil error?", "Qaz xətası niyə neft xətasından böyükdür?"),
-             "limits": ("When should the model not be trusted?", "Modelə nə vaxt etibar etmək olmaz?")}
+import copilot as CP                                                  # noqa: E402
 
 
-COPILOT_KW = {"stim": ("stimul", "skin", "acid", "turşu", "zədə", "damage", "priorit"), "missing": ("missing", "gap", "sensor", "çatış", "boşluq", "nan"),
-              "gas": ("gas", "qaz", "gor"), "overfit": ("overfit", "əzbər", "leak", "valid", "cv", "trust the metric"),
-              "limits": ("limit", "trust", "etibar", "when not", "hədd", "unseen", "new well", "yeni quyu"),
-              "hybrid": ("hybrid", "hibrid", "physics", "fizika", "ml", "why", "niyə", "better", "yaxşı")}
+def _card() -> dict:
+    return json.loads(CARD_PATH.read_text()) if CARD_PATH.exists() else {}
 
 
 @app.get("/api/copilot")
-def copilot(q: str = "", sid: str = "", lang: str = "en", text: str = ""):
-    """Deterministic engineering answers assembled from computed numbers only (no language model, works offline)."""
-    az = lang == "az"
-    T_ = lambda en, a: a if az else en
-    if q not in COPILOT_Q and text.strip():
-        low = text.lower()
-        for key, words in COPILOT_KW.items():
-            if any(w in low for w in words):
-                q = key
-                break
-        else:
-            return ok({"q": "", "question": text, "matched": False, "questions": {k: T_(*v) for k, v in COPILOT_Q.items()},
-                       "lines": [T_("I answer only from computed results. Try one of the questions below.",
-                                    "Yalnız hesablanmış nəticələrdən cavab verirəm. Aşağıdakı suallardan birini seçin.")], "source": "-"})
-    if q not in COPILOT_Q:
-        return ok({"questions": {k: T_(*v) for k, v in COPILOT_Q.items()}})
-    d = _proof()
-    M_ = {m["key"]: m for m in d.get("models", [])}
-    f3 = lambda x, n=2: " / ".join(f"{x[p]:.{n}f}" for p in PH)
-    owg = T_("oil / water / gas", "neft / su / qaz")
-    PHN = {"oil": T_("oil", "neft"), "water": T_("water", "su"), "gas": T_("gas", "qaz")}
-    lines, src = [], T_("validation summary (frozen forward CV)", "validasiya xülasəsi (dondurulmuş irəli CV)")
-    out = lambda: ok({"q": q, "question": T_(*COPILOT_Q[q]), "lines": lines, "source": src})
-    if q in ("hybrid", "overfit", "gas") and not M_:
-        lines = [T_("Validation summary file is not available in this build.", "Validasiya xülasəsi faylı bu versiyada yoxdur.")]
-        return out()
-    if q == "hybrid":
-        h, ph_ = M_["hybrid"], M_["physics"]
-        lines = [T_(f"Forward-CV MAPE {owg}: hybrid {f3(h['oos_mape'])} %, pure physics {f3(ph_['oos_mape'])} %.",
-                    f"İrəli CV MAPE {owg}: hibrid {f3(h['oos_mape'])} %, təmiz fizika {f3(ph_['oos_mape'])} %."),
-                 T_(f"R² {owg}: hybrid {f3(h['oos_r2'], 3)}, pure physics {f3(ph_['oos_r2'], 3)}.",
-                    f"R² {owg}: hibrid {f3(h['oos_r2'], 3)}, təmiz fizika {f3(ph_['oos_r2'], 3)}.")]
-        for p in PH:
-            v = ph_["vs_hybrid"][p]
-            sig = v["ci_lo"] > 0 or v["ci_hi"] < 0
-            lines.append(T_(f"{PHN[p]}: pure physics is {v['delta_pp']:+.2f} pp vs the hybrid (95 % CI {v['ci_lo']:+.2f} to {v['ci_hi']:+.2f}); "
-                            + ("significant." if sig else "not statistically significant."),
-                            f"{PHN[p]}: təmiz fizika hibriddən {v['delta_pp']:+.2f} f.b. fərqlənir (95 % etibarlılıq intervalı {v['ci_lo']:+.2f} … {v['ci_hi']:+.2f}); "
-                            + ("fərq əhəmiyyətlidir." if sig else "fərq statistik əhəmiyyətli deyil.")))
-        for k, nm in (("ml_ridge", T_("Pure ML (Ridge on raw sensors)", "Təmiz ML (xam sensorlarda Ridge)")), ("ml_gbdt", T_("Pure ML (boosted trees)", "Təmiz ML (boosting ağacları)"))):
-            if k in M_:
-                e = M_[k]["sanity"]["choke_elasticity_min"]
-                lines.append(T_(f"{nm}: MAPE {f3(M_[k]['oos_mape'])} %, train-to-OOS gap {M_[k]['gap_pp']:+.2f} pp (hybrid {h['gap_pp']:+.2f} pp); "
-                                f"minimum choke elasticity {e:+.2f}" + (" (unphysical: opening the choke lowers the rate)." if e <= 0 else "."),
-                                f"{nm}: MAPE {f3(M_[k]['oos_mape'])} %, təlim–OOS fərqi {M_[k]['gap_pp']:+.2f} f.b. (hibrid {h['gap_pp']:+.2f} f.b.); "
-                                f"minimum ştuser elastikliyi {e:+.2f}" + (" (qeyri-fiziki: ştuser açılanda debit azalır)." if e <= 0 else ".")))
-    elif q == "overfit":
-        h = M_["hybrid"]
-        cov = " / ".join(f"{d['coverage_p10_p90_pct'].get(p, float('nan')):.1f}" for p in PH)
-        lines = [T_(f"Train MAPE {f3(h['train_mape'])} % vs forward out-of-sample {f3(h['oos_mape'])} %: gap {h['gap_pp']:+.2f} pp.",
-                    f"Təlim MAPE {f3(h['train_mape'])} %, irəli nümunədən kənar {f3(h['oos_mape'])} %: fərq {h['gap_pp']:+.2f} f.b."),
-                 T_(f"Month-blocked CV mean MAPE {h['month_blocked_mean']:.2f} % (every calendar month held out in turn).",
-                    f"Ay-bloklu CV orta MAPE {h['month_blocked_mean']:.2f} % (hər təqvim ayı növbə ilə kənarda saxlanır)."),
-                 T_(f"Protocol: {d['protocol']['forward_cv']}; hyper-parameters are chosen inside each training fold only.",
-                    "Protokol: 4 kəsim, 90 günlük üfüq, n = 109; hiperparametrlər yalnız hər təlim qatının daxilində seçilir."),
-                 T_(f"P10–P90 coverage {owg}: {cov} % (nominal 80 %).", f"P10–P90 əhatəsi {owg}: {cov} % (nominal 80 %).")]
-    elif q == "gas":
-        h = M_["hybrid"]
-        worst = ", ".join(f"{r['well']} {r['gas']:.1f} %" for r in sorted(h["per_well"], key=lambda r: -r["gas"])[:2])
-        lines = [T_(f"Forward-CV MAPE: oil {h['oos_mape']['oil']:.2f} %, gas {h['oos_mape']['gas']:.2f} %.",
-                    f"İrəli CV MAPE: neft {h['oos_mape']['oil']:.2f} %, qaz {h['oos_mape']['gas']:.2f} %."),
-                 T_("Gas = oil rate × GOR, so the gas error contains the oil error plus the GOR-trend error between tests.",
-                    "Qaz = neft debiti × GOR; ona görə qaz xətasına neft xətası və testlər arasındakı GOR trendinin xətası daxildir."),
-                 T_(f"Largest gas errors: {worst}.", f"Ən böyük qaz xətaları: {worst}.")]
-    elif q == "missing":
-        lines = [T_(f"{m['sensor']}: missing on {m['prod_missing_pct']:.2f} % of production days, {m['test_missing_pct']:.0f} % of test days.",
-                    f"{m['sensor']}: istehsal günlərinin {m['prod_missing_pct']:.2f} %-də, test günlərinin {m['test_missing_pct']:.0f} %-də yoxdur.") for m in d.get("missing", [])]
-        lines += [T_(f"{d.get('imputed_production_rows', 0)} of {d.get('production_rows', 0)} production well-days had a sensor gap: the value is carried "
-                     "forward (then backward) within the same well and the row is flagged 'imputed'; a full shut-in day is exactly 0.",
-                     f"{d.get('production_rows', 0)} istehsal quyu-günündən {d.get('imputed_production_rows', 0)}-də sensor boşluğu var: dəyər eyni quyunun "
-                     "əvvəlki (sonra növbəti) günündən götürülür və sətir 'imputed' kimi işarələnir; tam bağlanma günündə debit dəqiq 0-dır."),
-                  T_("Sensors that exist only on test days (annulus pressure, downhole temperature) are not model inputs.",
-                     "Yalnız test günlərində olan sensorlar (annulus təzyiqi, quyudibi temperaturu) modelin girişi deyil.")]
-        src = T_("missing-data audit", "çatışmayan data auditi")
-    elif q == "limits":
-        lines = [T_("No separator test for the well: rates use field-median calibration and are flagged uncalibrated.",
-                    "Quyunun separator testi yoxdursa: debit yataq medianı ilə kalibrlənir və 'kalibrlənməyib' kimi işarələnir."),
-                 T_("More than 180 days after the last test: water-cut and GOR trends are frozen, not extrapolated.",
-                    "Son testdən 180 gündən çox keçibsə: su payı və GOR trendləri dondurulur, ekstrapolyasiya edilmir."),
-                 T_("Inputs far outside the tested choke / pressure range are extrapolation (the what-if panel flags this).",
-                    "Sınaqdan keçmiş ştuser / təzyiq diapazonundan çox kənar girişlər ekstrapolyasiyadır (what-if paneli bunu göstərir).")]
-        lo = json.loads(CARD_PATH.read_text()).get("vfm", {}).get("leave_one_well_out", {}) if CARD_PATH.exists() else {}
-        if lo:
-            v = " / ".join(f"{lo[p]['MAPE_%']:.1f}" for p in PH)
-            lines.append(T_(f"Unseen-well (leave-one-well-out) MAPE {owg}: {v} %.", f"Görülməmiş quyu (leave-one-well-out) MAPE {owg}: {v} %."))
-        src = T_("model card", "model kartı")
-    elif q == "stim":
-        if not sid:
-            lines = [T_("Load a dataset first.", "Əvvəlcə data yükləyin.")]
-            return out()
-        rows = [x for x in pta_rows(session(sid)["R"]) if x.get("skin") is not None and x["skin"] > 0 and x.get("dq_stb_d")]
-        rows.sort(key=lambda x: -x["dq_stb_d"])
-        lines = [T_(f"{x['well']}: skin {x['skin']:+.2f}, Δp_skin {x['dp_skin_psi']:.0f} psi, theoretical gain {x['dq_stb_d']:.0f} STB/d if skin is removed.",
-                    f"{x['well']}: skin {x['skin']:+.2f}, Δp_skin {x['dp_skin_psi']:.0f} psi, skin aradan qaldırılsa nəzəri artım {x['dq_stb_d']:.0f} STB/gün.")
-                 for x in rows] or [T_("No build-up with positive skin in the loaded data.", "Yüklənmiş datada müsbət skinli bərpa yoxdur.")]
-        if rows:
-            lines.append(T_(f"First candidate: {rows[0]['well']}. The gain is an upper bound at constant drawdown, used for ranking.",
-                            f"Birinci namizəd: {rows[0]['well']}. Artım sabit depressiyada yuxarı həddir və sıralama üçün istifadə olunur."))
-        src = T_("PTA results of the loaded dataset", "yüklənmiş datanın PTA nəticələri")
-    return out()
+def copilot(q: str = "", sid: str = "", lang: str = "en", text: str = "", well: str = "", d0: str | None = None,
+            d1: str | None = None):
+    """Deterministic engineering answers assembled from computed numbers only (no language model, works offline).
+    The question is parsed into well / period / metric / intent; every number in the answer is read from the tables
+    of the loaded session. Outside the data range, or with nothing computed, the answer says so."""
+    s = session(sid) if sid else None
+    ctx = CP.Ctx(s=s, lang=lang, well=well or None, d0=d0, d1=d1, proof=_proof(), card=_card(),
+                 daily_tables=daily_tables, pta_rows=pta_rows, anomaly_rows=anomaly_rows, blend_with_band=blend_with_band)
+    question = text.strip()[:400] or (CP.KB_Q[q][1 if lang == "az" else 0] if q in CP.KB_Q else "")
+    if not question:
+        return ok({"chips": CP.chips(ctx), "context": CP.context(ctx)})
+    return ok(CP.answer(ctx, question))
 
 
-@app.get("/api/anomalies")
-def anomalies(sid: str):
-    """Rule-based surveillance over every well-day of the loaded data (structured rows; the UI renders the text)."""
-    s = session(sid)
-    P = s["R"]["P"].assign(date=lambda d: pd.to_datetime(d.date)).sort_values(["well_name", "date"])
-    V = s["R"]["Bl"].assign(date=lambda d: pd.to_datetime(d.date))
+def anomaly_rows(s: dict, d0: str | None = None, d1: str | None = None) -> tuple[list[dict], int, dict]:
+    """Rule-based surveillance over every well-day of the period (structured rows; the UI / copilot render the text)."""
+    V, P = daily_tables(s, d0, d1)
+    P = P.sort_values(["well_name", "date"])
+    rules = {"critical_y": Y_CRIT, "water_cut_pp": 5, "gor_pct": 10, "oil_decline_pct": 20, "partial_uptime": 0.95, "rate_drop_pct": 12}
     rows = []
     d8 = lambda x: pd.Timestamp(x).strftime("%Y-%m-%d")
     for w, g in P.groupby("well_name"):
@@ -783,23 +760,44 @@ def anomalies(sid: str):
             if crit.any():
                 rows.append({"well": w, "type": "critical_choke", "severity": "info", "days": int(crit.sum()), "share_pct": float(crit.mean() * 100),
                              "value": float(np.nanmedian(y)), "first": d8(fl.date[crit].min()), "last": d8(fl.date[crit].max())})
-        v = V[V.well_name == w].assign(m=lambda d: d.date.dt.to_period("M").astype(str)).groupby("m")[list(RATES.values())].sum()
+        vw = V[V.well_name == w].assign(m=lambda d: d.date.dt.to_period("M").astype(str))
+        v = vw.groupby("m")[list(RATES.values())].sum()
+        nd = vw.groupby("m").date.nunique()
+        full = [m for m in v.index if month_complete(m, nd[m])]
+        if len(full) >= 2:                                   # incomplete months never enter a first-vs-last comparison
+            v, nd = v.loc[full], nd.loc[full]
         v = v[v.oil_rate_stbd > 0]
         if len(v) >= 2:
             wc = v.water_rate_stbd / (v.oil_rate_stbd + v.water_rate_stbd) * 100
             gor = v.gas_rate_mscfd * 1000 / v.oil_rate_stbd
-            dq = (v.oil_rate_stbd.iloc[-1] / pd.Period(v.index[-1]).days_in_month) / (v.oil_rate_stbd.iloc[0] / pd.Period(v.index[0]).days_in_month)
-            if wc.iloc[-1] - wc.iloc[0] >= 5:
+            avg = v.oil_rate_stbd / nd.loc[v.index]
+            dq = avg.iloc[-1] / avg.iloc[0]
+            if wc.iloc[-1] - wc.iloc[0] >= rules["water_cut_pp"]:
                 rows.append({"well": w, "type": "water_cut_drift", "severity": "warn", "from": float(wc.iloc[0]), "to": float(wc.iloc[-1]),
                              "first": v.index[0], "last": v.index[-1]})
-            if abs(gor.iloc[-1] / gor.iloc[0] - 1) >= 0.10:
+            if abs(gor.iloc[-1] / gor.iloc[0] - 1) >= rules["gor_pct"] / 100:
                 rows.append({"well": w, "type": "gor_drift", "severity": "warn", "from": float(gor.iloc[0]), "to": float(gor.iloc[-1]),
                              "first": v.index[0], "last": v.index[-1]})
-            if dq - 1 <= -0.20:
+            if dq - 1 <= -rules["oil_decline_pct"] / 100:
                 rows.append({"well": w, "type": "oil_decline", "severity": "alert", "change_pct": float((dq - 1) * 100), "first": v.index[0], "last": v.index[-1]})
+            # sudden drop: flowing-day oil rate falls month over month with the choke unchanged (not an operator action)
+            fw = vw.merge(g[["date", "uptime", "choke_opening_pct"]], on="date", how="left")
+            fw = fw[fw.uptime >= 0.99]
+            fm = fw.groupby("m").agg(oil=("oil_rate_stbd", "mean"), choke=("choke_opening_pct", "mean")).reindex(v.index).dropna()
+            for i in range(1, len(fm)):
+                ch = fm.oil.iloc[i] / fm.oil.iloc[i - 1] - 1
+                if ch <= -rules["rate_drop_pct"] / 100 and abs(fm.choke.iloc[i] / fm.choke.iloc[i - 1] - 1) < 0.01:
+                    rows.append({"well": w, "type": "rate_drop", "severity": "alert", "change_pct": float(ch * 100),
+                                 "from": float(fm.oil.iloc[i - 1]), "to": float(fm.oil.iloc[i]), "first": fm.index[i - 1], "last": fm.index[i]})
     order = {"alert": 0, "warn": 1, "info": 2}
     rows.sort(key=lambda r: (order[r["severity"]], r["well"]))
-    return ok({"rows": rows, "well_days": int(len(P)), "rules": {"critical_y": Y_CRIT, "water_cut_pp": 5, "gor_pct": 10, "oil_decline_pct": 20, "partial_uptime": 0.95}})
+    return rows, int(len(P)), rules
+
+
+@app.get("/api/anomalies")
+def anomalies(sid: str, d0: str | None = None, d1: str | None = None):
+    rows, n, rules = anomaly_rows(session(sid), d0, d1)
+    return ok({"rows": rows, "well_days": n, "rules": rules})
 
 
 @app.get("/api/summary")
@@ -970,25 +968,54 @@ def model_card():
         "trend_horizon_days": TREND_HORIZON_DAYS})
 
 
-@app.get("/api/export/{kind}")
-def export(kind: str, sid: str):
+def _export(kind: str, sid: str, d0: str | None, d1: str | None, notes: list | None = None):
     s = session(sid)
     R = s["R"]
+    Bl = clip(R["Bl"], d0, d1)
+    if Bl.empty:
+        raise HTTPException(404, "No data in the selected period.")
+    t = pd.to_datetime(Bl["date"])
+    tag = f"{t.min():%Y%m%d}_{t.max():%Y%m%d}"
+    a, b = _day(d0), _day(d1)
+    ptas = [(r, pl) for r, pl in R["pta"] if (a is None or pd.Timestamp(r["t_shut"]) >= a)
+            and (b is None or pd.Timestamp(r["t_shut"]) < b + pd.Timedelta(days=1))]
     if kind == "vfm_csv":
-        return Response(to_portal_csv(portal_vfm_rates(R["Bl"])), media_type="text/csv",
-                        headers={"Content-Disposition": "attachment; filename=vfm_submission.csv"})
+        return Response(to_portal_csv(portal_vfm_rates(Bl)), media_type="text/csv",
+                        headers={"Content-Disposition": f"attachment; filename=vfm_submission_{tag}.csv"})
     if kind == "pta_csv":
-        return Response(to_portal_csv(portal_pta_horner(AP.horner_rows(R["pta"]))), media_type="text/csv",
-                        headers={"Content-Disposition": "attachment; filename=pta_submission.csv"})
+        return Response(to_portal_csv(portal_pta_horner(AP.horner_rows(ptas))), media_type="text/csv",
+                        headers={"Content-Disposition": f"attachment; filename=pta_submission_{tag}.csv"})
     if kind == "xlsx":
         it = pd.DataFrame([{"well": r["well_name"], "t_shut": str(r["t_shut"]), "line": l}
-                           for r, _ in R["pta"] for l in (r.get("interp") or {}).get("lines", [])])
-        b = to_excel_bytes({"VFM": portal_vfm_rates(R["Bl"]), "VFM_P10_P90": blend_with_band(R).assign(date=lambda d: d.date.dt.date),
-                            "PTA": portal_pta_horner(AP.horner_rows(R["pta"])), "PTA_detail": pd.DataFrame(pta_rows(R)),
-                            "Interpretation": it, "Warnings": pd.DataFrame({"warning": R["warnings"]})})
-        return Response(b, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        headers={"Content-Disposition": "attachment; filename=caspianx_results.xlsx"})
+                           for r, _ in ptas for l in (r.get("interp") or {}).get("lines", [])])
+        keep = {id(r) for r, _ in ptas}
+        detail = pd.DataFrame([x for x, (r, _) in zip(pta_rows(R), R["pta"]) if id(r) in keep])
+        info = pd.DataFrame({"item": ["source", "period", "note"],
+                             "value": [s["source"], f"{t.min():%Y-%m-%d} to {t.max():%Y-%m-%d}",
+                                       "SYNTHETIC DEMO DATA - not field data" if "synthetic" in s["source"] else ""]})
+        b_ = to_excel_bytes({"Info": info, "VFM": portal_vfm_rates(Bl),
+                             "VFM_P10_P90": clip(blend_with_band(R), d0, d1).assign(date=lambda d: d.date.dt.date),
+                             "PTA": portal_pta_horner(AP.horner_rows(ptas)), "PTA_detail": detail,
+                             "Interpretation": it, "Warnings": pd.DataFrame({"warning": R["warnings"]})})
+        return Response(b_, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        headers={"Content-Disposition": f"attachment; filename=caspianx_results_{tag}.xlsx"})
     if kind == "report_html":
-        return Response(report_html(s), media_type="text/html",
-                        headers={"Content-Disposition": "attachment; filename=caspianx_engineering_summary.html"})
+        return Response(report_html(s, d0, d1, notes), media_type="text/html",
+                        headers={"Content-Disposition": f"attachment; filename=caspianx_engineering_summary_{tag}.html"})
     raise HTTPException(404, f"Unknown export '{kind}'. Use vfm_csv, pta_csv, xlsx or report_html.")
+
+
+@app.get("/api/export/{kind}")
+def export(kind: str, sid: str, d0: str | None = None, d1: str | None = None):
+    return _export(kind, sid, d0, d1)
+
+
+@app.post("/api/export/report_html")
+async def export_report(request: Request, sid: str, d0: str | None = None, d1: str | None = None):
+    """Engineering summary with the copilot answers the engineer chose to include (sent by the browser)."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    notes = body.get("notes") if isinstance(body, dict) else None
+    return _export("report_html", sid, d0, d1, notes if isinstance(notes, list) else None)

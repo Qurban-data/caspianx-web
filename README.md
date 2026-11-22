@@ -25,6 +25,23 @@ Virtual debit ölçmə (VFM), avtomatik təzyiq bərpası analizi (PTA) və müh
 | Lay davranışının şərhi | mühəndis şərhi, quyuların müqayisəsi, xəbərdarlıqlar |
 | VFM və PTA nəticələrinin ixracı | VFM CSV · PTA CSV · Excel · Hesabat |
 
+### Sintetik demo data
+
+"Demo datanı yüklə" düyməsi **sintetik** (süni yaradılmış) yataq açır: 2025-01-01 → 2025-09-30, 10 quyu (GL-01 … GL-10).
+Bu, real yataq datası deyil; tətbiqdə "Sintetik demo data" nişanı, Excel ixracında `Info` vərəqi və hesabatda xəbərdarlıq bunu göstərir.
+Generator deterministikdir (`web_app/demo_data.py`, seed 2026); nəticə `web_app/demo_static/` qovluğunda statik fayl kimi saxlanır
+(`python tools/build_demo_static.py` ilə yenilənir). Datada qəsdən qoyulmuş hadisələr: GL-03-də iyulda skin zədəsi və 12 avqust bərpası
+(skin ≈ +8), GL-01 (mart) və GL-04 (may) bərpaları, GL-06-da fevralda 2 günlük bağlanma, GL-08-də mayda 4 günlük WHP sensor boşluğu.
+
+Demo sessiyasının sabit identifikatoru var (`demo`): serverless hostda sorğu başqa instansa düşsə, həmin instans eyni demonu yenidən qurur,
+ona görə demo heç vaxt "Session not found or expired" xətası vermir.
+
+### Copilot
+
+Copilot dil modeli istifadə etmir: sualdan quyu, ay/rüb, metrik və niyyət çıxarılır (`web_app/copilot.py`), cavab yalnız yüklənmiş datanın
+hesablanmış cədvəllərindən (aylıq debitlər, sensorlar, PTA, anomaliya qaydaları, validasiya xülasəsi) yığılır. Data aralığından kənar dövr,
+olmayan quyu və ya aidiyyatsız sual üçün rəqəm vermir və bunu açıq deyir.
+
 ### İşə salma
 
 ```

@@ -35,6 +35,9 @@
     <span id="dsPill" class="pill">No dataset loaded</span>
     <span id="dsBadge" class="badge none">NO DATA</span>
     <div class="seg" id="langSeg"><button data-lang="az" class="on">AZ</button><button data-lang="en">EN</button></div>
+    <div class="profile" id="expWrap" data-tip="Load data first"><button id="btnExport" class="btn-notes" disabled aria-haspopup="true">Export</button>
+      <div class="menu" id="expMenu"><div class="who"><b>Export</b><span id="expPeriod"></span></div>
+        <button data-exp="vfm_csv">VFM CSV</button><button data-exp="pta_csv">PTA CSV</button><button data-exp="xlsx">Excel</button><button data-exp="report_html">Report <span id="repCnt" class="cnt zero">0</span></button></div></div>
     <button id="btnCopilot" class="btn-notes">Copilot</button>
     <div class="profile"><button id="btnUser" class="btn-notes"><span id="userName">–</span></button>
       <div class="menu" id="userMenu"><div class="who"><b id="umName"></b><span id="umRole"></span></div>
@@ -46,7 +49,7 @@
 <div class="layout">
   <aside class="rail">
     <section>
-      <h4><span>01</span>Data</h4>
+      <h4>Data</h4>
       <label id="drop" class="drop">
         <input id="file" type="file" multiple accept=".csv,.xlsx,.xls,.zip,.json">
         Drop CSV · Excel · ZIP<br><small>per-minute files of any size are streamed to disk</small>
@@ -58,35 +61,36 @@
       <button id="btnDemo" class="btn mt8">Load demo data</button>
     </section>
     <section>
-      <h4><span>02</span>Well</h4>
+      <h4>Well</h4>
       <select id="well" disabled><option>—</option></select>
-    </section>
-    <section>
-      <h4><span>03</span>Export</h4>
-      <div class="grid2">
-        <button class="btn" data-exp="vfm_csv" disabled>VFM CSV</button>
-        <button class="btn" data-exp="pta_csv" disabled>PTA CSV</button>
-        <button class="btn" data-exp="xlsx" disabled>Excel</button>
-        <button class="btn" data-exp="report_html" disabled>Report</button>
-      </div>
     </section>
     <div class="foot" id="railFoot">Upload well data or load the demo to start.</div>
   </aside>
 
   <main>
     <div class="tabsbar">
-      <nav class="tabs">
-        <button data-tab="ov" class="on"><span class="step">01</span>Overview</button>
-        <button data-tab="mon"><span class="step">02</span>Monthly analysis</button>
-        <button data-tab="meas"><span class="step">03</span>Measurements</button>
-        <button data-tab="vfm"><span class="step">04</span>VFM &amp; Predictions</button>
-        <button data-tab="pta"><span class="step">05</span>PTA &amp; Reservoir</button>
-        <button data-tab="anom"><span class="step">06</span>AI anomaly detection</button>
-        <button data-tab="proof"><span class="step">07</span>Model proof</button>
+      <nav class="tabs" aria-label="Sections">
+        <span class="tgroup">Monitoring</span>
+        <button data-tab="ov" class="on">Overview</button>
+        <button data-tab="mon">Monthly analysis</button>
+        <button data-tab="meas">Measurements</button>
+        <span class="tgroup">Models</span>
+        <button data-tab="vfm">VFM &amp; Predictions</button>
+        <button data-tab="pta">PTA &amp; Reservoir</button>
+        <span class="tgroup">Trust</span>
+        <button data-tab="anom">AI anomaly detection</button>
+        <button data-tab="proof">Model proof</button>
       </nav>
-      <div class="tools"><span class="label">Period</span>
-        <div class="seg months" id="rangeSeg"><button data-r="all" class="on">Whole period</button></div>
-      </div>
+    </div>
+    <div class="periodbar" id="periodBar">
+      <span class="label">Period</span>
+      <div class="seg" id="rangeSeg"><button data-r="all" class="on">Whole period</button></div>
+      <select id="monthSel" aria-label="Month" disabled><option value="">Month</option></select>
+      <div class="dual" id="rangeDual" aria-label="Date range"><div class="dual-track"><i id="dualFill"></i></div>
+        <input type="range" id="rgA" min="0" max="1" value="0" step="1" aria-label="Period start" disabled>
+        <input type="range" id="rgB" min="0" max="1" value="1" step="1" aria-label="Period end" disabled></div>
+      <span class="mono periodlbl" id="periodLbl"></span>
+      <span class="badge demo synth" id="synthTag" style="display:none">Synthetic demo data</span>
     </div>
 
     <section id="tab-ov" class="tab on">
@@ -95,8 +99,16 @@
           <div class="sub">Virtual flow metering × pressure-transient analysis · <span id="ovDay">no dataset loaded</span></div></div>
         <div class="seg" id="ovSeg"><button data-s="field" class="on">Field</button><button data-s="well">Well</button></div>
       </div>
+      <div class="empty" id="empty">
+        <h2>No data loaded yet</h2>
+        <p>Load the synthetic demo field to see every view filled in, or drop your own well files in the left panel.</p>
+        <button class="btn solid" id="btnDemoBig">Load demo data</button>
+        <ol class="steps"><li><b>Load</b><span>demo data or your CSV · Excel · ZIP files</span></li>
+          <li><b>Pick a well</b><span>and a period: quarter, month or date range</span></li>
+          <li><b>Ask the Copilot</b><span>why a rate changed or which well to treat first</span></li></ol>
+      </div>
       <div class="kpis" id="kpis"></div>
-      <div class="ov-grid">
+      <div class="ov-grid" id="ovGrid">
         <div class="panel"><div class="hd"><h3>Daily production <span class="sc" id="ovChartScope"></span></h3><span class="label">Submitted VFM blend</span></div>
           <div id="ovChart" class="chart" style="height:520px"></div></div>
         <div class="panel"><div class="hd"><h3>Findings &amp; action queue</h3><span class="label" id="qCount"></span></div>
@@ -114,7 +126,7 @@
       <div class="panel"><div class="hd"><h3>Average daily rate by month <span class="sc" id="monBarScope"></span></h3><span class="label">label = change vs previous month</span></div>
         <div id="monBars" class="chart" style="height:440px"></div></div>
       <div class="panel"><div class="hd"><h3>Month-by-month comparison</h3><span class="label">click a month to zoom every chart</span></div>
-        <div class="tablewrap"><table id="monTable"></table></div></div>
+        <div class="tablewrap"><table id="monTable"></table></div><p class="note" id="monNote"></p></div>
       <div class="mon-grid">
         <div class="panel"><div class="hd"><h3>Well × month</h3>
           <div class="seg" id="heatSeg"><button data-p="oil" class="on">Oil</button><button data-p="water">Water</button><button data-p="gas">Gas</button><button data-p="chg">Change %</button></div></div>
@@ -133,10 +145,10 @@
 
     <section id="tab-vfm" class="tab">
       <div class="metrics" id="vfmMetrics"></div>
-      <div class="panel"><div class="hd"><h3>Daily oil · water · gas <span class="sc" id="vfmScope"></span></h3>
+      <div class="panel"><div class="hd"><h3>Daily oil · water · gas <span class="sc" id="vfmScope"></span><span class="help" data-help="vfm" tabindex="0">?</span></h3>
         <div class="layers" id="vfmLayers">
-          <button class="chip on" data-l="band">P10–P90</button><button class="chip on" data-l="tests">Separator tests</button>
-          <button class="chip on" data-l="shut">Shut-in</button><button class="chip" data-l="a">Model A</button><button class="chip" data-l="b">Model B</button>
+          <button class="chip on" data-l="band">P10–P90</button><span class="help" data-help="p1090" tabindex="0">?</span><button class="chip on" data-l="tests">Separator tests</button>
+          <button class="chip on" data-l="shut">Shut-in</button><button class="chip" data-l="a">Choke physics + Ridge</button><button class="chip" data-l="b">Direct Ridge</button>
         </div></div>
         <div id="vfmChart" class="chart" style="height:640px"></div>
         <p class="note">Solid line = submitted blend. Zoom or pan any phase: all three phases and the range presets stay in sync.</p></div>
@@ -153,7 +165,7 @@
 
     <section id="tab-pta" class="tab">
       <div class="inline-note" id="ptaNotice"></div>
-      <div class="ev-bar"><span class="label">Build-up</span><select id="evSel"></select><span id="ptaSrc" class="srcbadge"></span><span id="ptaFlag" class="srcbadge"></span></div>
+      <div class="ev-bar"><span class="label">Build-up</span><span class="help" data-help="bourdet" tabindex="0">?</span><select id="evSel"></select><span id="ptaSrc" class="srcbadge"></span><span id="ptaFlag" class="srcbadge"></span></div>
       <div class="sig" id="sig"></div>
       <div class="panel"><div class="pgrid">
         <div id="pLog" class="chart"></div><div id="pHor" class="chart"></div>
@@ -212,18 +224,20 @@
   <div class="hd"><span class="label">Settings</span><button class="x" id="settingsX">Close</button></div>
   <div class="bd set">
     <div class="row"><span>Signed in as</span><b id="setUser"></b></div>
-    <div class="row"><span>Language</span><div class="seg" id="langSegSet"><button data-lang="az">AZ</button><button data-lang="en">EN</button></div></div>
     <div class="row"><span>Theme</span><div class="seg" id="themeSeg"><button data-theme="dark">Dark</button><button data-theme="light">Light</button></div></div>
     <div class="row"><span>Oil price, $/bbl</span><input id="setPrice" type="number" min="1" max="300" step="1"></div>
     <div class="row"><span>Skin alert threshold</span><input id="setSkin" type="number" min="0" max="20" step="0.5"></div>
-    <div class="row"><span>Export</span><div class="grid2"><button class="btn" data-exp="vfm_csv">VFM CSV</button><button class="btn" data-exp="pta_csv">PTA CSV</button><button class="btn" data-exp="xlsx">Excel</button><button class="btn" data-exp="report_html">Report</button></div></div>
     <div class="row"><span></span><button class="btn" id="setOut">Sign out</button></div>
   </div>
 </aside>
-<aside class="drawer" id="copilot">
-  <div class="hd"><span class="label">Well copilot · answers from computed results only</span><button class="x" id="copilotX">Close</button></div>
-  <div class="bd"><form id="copilotForm" class="cform"><input id="copilotText" type="text" placeholder="Ask about the model, wells or data"><button class="btn" type="submit">Ask</button></form><div id="copilotQ" class="cq"></div><div id="copilotA" class="ca"></div></div>
+<aside class="drawer side" id="copilot" aria-label="Copilot">
+  <div class="hd"><div><span class="label">Well copilot · answers from computed results only</span><div class="cctx" id="copilotCtx"></div></div>
+    <div class="hd-btns"><button class="x" id="copilotClear">Clear</button><button class="x" id="copilotX">Close</button></div></div>
+  <div class="bd chat" id="copilotLog"><div class="cempty" id="copilotEmpty">Ask a question or pick one below. Every number comes from the loaded data; when there is no computed result, the answer says so.</div></div>
+  <div class="cfoot"><div id="copilotQ" class="cq"></div>
+    <form id="copilotForm" class="cform"><input id="copilotText" type="text" maxlength="400" placeholder="Ask about the model, wells or data" autocomplete="off"><button class="btn" type="submit">Ask</button></form></div>
 </aside>
+<div class="tip" id="tip" role="tooltip"></div>
 <div class="toast" id="toast"></div>
 <script src="/static/i18n.js"></script>
 <script src="/static/app.js"></script>

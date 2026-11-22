@@ -75,12 +75,12 @@ def test_index_and_health():
 
 
 def test_upload_unseen_zip_all_endpoints():
-    z = demo.demo_zip(model())                                                          # (1) upload: Oct-Dec, never trained on
+    z = demo.demo_zip(model())                                                          # (1) upload: synthetic Jan-Sep field
     j = _upload([("files", ("unseen_field.zip", z, "application/zip"))])
-    assert j["period"][0] >= "2025-10-01" and j["n_buildups"] == 2
+    assert j["period"] == ["2025-01-01", "2025-09-30"] and j["n_buildups"] == 3
     p, pr, it = _all_endpoints(j["sid"], j["wells"][0])
-    assert len(p["events"]) == 2 and all(len(e["deriv"]) > 20 for e in p["events"])
-    assert all(r["k_md"] and r["k_md"] > 0 for r in pr["rows"]) and len(it["events"]) == 2 and len(it["wells"]) == len(j["wells"])
+    assert len(p["events"]) == 3 and all(len(e["deriv"]) > 20 for e in p["events"])
+    assert all(r["k_md"] and r["k_md"] > 0 for r in pr["rows"]) and len(it["events"]) == 3 and len(it["wells"]) == len(j["wells"])
 
 
 def test_demo_button():
@@ -155,17 +155,67 @@ def test_model_proof_what_if_and_copilot():
     w1 = _check(client.get(f"/api/what-if?sid={j['sid']}&well={j['wells'][0]}&choke={min(100, w0['base']['choke'] * 1.1)}"))
     assert w1["rates"]["oil"] > w0["rates"]["oil"]                      # opening the choke raises the rate
     assert client.get(f"/api/what-if?sid={j['sid']}&well={j['wells'][0]}&pds=99999").status_code == 422
-    qs = _check(client.get("/api/copilot"))["questions"]
-    for q in qs:
+    for q in ("hybrid", "overfit", "missing", "gas", "limits"):
         for lang in ("en", "az"):
             a = _check(client.get(f"/api/copilot?q={q}&sid={j['sid']}&lang={lang}"))
             assert a["lines"] and all(isinstance(x, str) and x for x in a["lines"])
 
 
+def _ask(text, lang="az", **kw):
+    return _check(client.get("/api/copilot", params={"text": text, "sid": "demo", "lang": lang, **kw}))
+
+
+def test_demo_session_is_stable_and_never_expires():
+    """The demo has a fixed id: a fresh server instance (empty session store) rebuilds it instead of answering 404."""
+    import web_app.main as M
+    j = _check(client.post("/api/demo"))
+    assert j["sid"] == "demo" and j["period"] == ["2025-01-01", "2025-09-30"] and j["dataset_kind"] == "DEMO"
+    assert all(m["complete"] for m in j["months"]) and len(j["months"]) == 9
+    M.SESSIONS.clear()                                                                   # simulate another instance
+    for path in ("/api/pta?sid=demo", "/api/interpret?sid=demo", "/api/vfm?sid=demo&well=GL-01", "/api/measurements?sid=demo&well=GL-01"):
+        _check(client.get(path))
+    a = demo.generate(model()); b = demo.build(model())                                  # static copy == seeded generator
+    assert [x for _, x in a] == [x for _, x in b]
+
+
+def test_period_filter_and_incomplete_months():
+    m = _check(client.get("/api/monthly?sid=demo&d0=2025-07-01&d1=2025-09-30"))
+    assert [r["month"] for r in m["months"]] == ["2025-07", "2025-08", "2025-09"] and m["period"] == ["2025-07-01", "2025-09-30"]
+    p = _check(client.get("/api/monthly?sid=demo&d0=2025-03-10&d1=2025-05-31"))
+    assert [r["complete"] for r in p["months"]] == [False, True, True]
+    q = _check(client.get("/api/monthly?sid=demo"))["quarters"]
+    assert [x["label"] for x in q] == ["Q1", "Q2", "Q3"] and all(x["complete"] for x in q)
+    r = client.get("/api/export/vfm_csv?sid=demo&d0=2025-08-01&d1=2025-08-31")
+    csv = pd.read_csv(io.BytesIO(r.content))
+    assert r.status_code == 200 and csv.timestamp.str[:7].unique().tolist() == ["2025-08"] and "20250801_20250831" in r.headers["content-disposition"]
+    an = _check(client.get("/api/anomalies?sid=demo"))["rows"]
+    assert any(x["well"] == "GL-03" and x["type"] == "rate_drop" and x["last"] == "2025-07" for x in an)
+
+
+def test_copilot_parses_questions_and_answers_honestly():
+    a = _ask("Sentyabrda GL-03 quyusunda hasilat niyə düşüb?")                      # (1) well + month + metric
+    assert a["intent"] == "why" and a["focus"]["well"] == "GL-03" and not a["lines"][0].startswith("İrəli CV")
+    assert any("skin" in l for l in a["lines"]) and "Hibrid" not in " ".join(a["lines"])
+    b = _ask("Dekabrda GL-03 hasilatı nə qədər olub?")                               # (2) outside the data range
+    assert b["in_range"] is False and "yan–sen 2025" in b["lines"][0]
+    c = _ask("Hansı quyu birinci?")                                                    # (3) ranking, not one well
+    assert c["intent"] == "stim" and c["lines"][1].startswith("1. GL-03") and c["lines"][2].startswith("2. GL-01")
+    d = _ask("Bu quyuda su payı necədir?", well="GL-05")                              # (4) context well
+    assert d["focus"]["well"] == "GL-05" and "GL-05" in d["lines"][0]
+    e = _ask("Bakıda hava necədir?")                                                   # (5) unrelated question
+    assert e["matched"] is False and not any(ch.isdigit() for ch in " ".join(e["lines"]))
+    f = _ask("GL-15 necə işləyir?")
+    assert f["in_range"] is False and "GL-15" in f["lines"][0]
+    g = _ask("Why did GL-03 drop in July?", lang="en")
+    assert g["focus"]["month"] == "2025-07" and "skin" in " ".join(g["lines"])
+    ch = _check(client.get("/api/copilot", params={"sid": "demo", "lang": "az", "well": "GL-03"}))
+    assert ch["chips"][0].startswith("GL-03") and ch["context"]["well"] == "GL-03"
+
+
 def test_sign_in_sign_out_and_protected_routes():
     c = TestClient(app)
     assert c.get("/api/health").status_code == 200                                   # health stays open
-    assert c.get("/api/auth/me").status_code == 401
+    assert c.get("/api/auth/me").json()["ok"] is False
     assert c.post("/api/demo").status_code == 401 and c.get("/api/model-proof").status_code == 401
     r = c.post("/api/auth/login", data={"username": "jury", "password": "wrong"})
     assert r.status_code == 401 and r.json()["ok"] is False and "cx_session" not in c.cookies
@@ -174,12 +224,12 @@ def test_sign_in_sign_out_and_protected_routes():
     assert j["role"] == "jury" and _check(c.get("/api/auth/me"))["user"] == "jury"
     assert c.post("/api/demo").status_code == 200
     c.cookies.set("cx_session", "jury.9999999999.forged")
-    assert c.get("/api/auth/me").status_code == 401                                  # forged cookie is rejected
+    assert c.get("/api/auth/me").json()["ok"] is False                                  # forged cookie is rejected
     c.cookies.clear()
     _check(c.post("/api/auth/jury"))                                                 # one-click evaluator access
     assert _check(c.get("/api/auth/me"))["role"] == "jury"
     _check(c.post("/api/auth/logout"))
-    assert c.get("/api/auth/me").status_code == 401 and c.post("/api/demo").status_code == 401
+    assert c.get("/api/auth/me").json()["ok"] is False and c.post("/api/demo").status_code == 401
 
 
 def test_anomalies_and_typed_copilot():
