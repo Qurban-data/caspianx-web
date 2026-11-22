@@ -14,7 +14,6 @@ Virtual debit ölçmə (VFM), avtomatik təzyiq bərpası analizi (PTA) və müh
 | 3 | Bütün xanaları işlədilmiş notebook | [`notebook/CaspianX_Solution.ipynb`](notebook/CaspianX_Solution.ipynb) |
 | 4 | PTA qrafikləri | [`pta_plots/`](pta_plots/) (hər bərpa üçün log-log + Bourdet və Horner) |
 | – | Veb tətbiq (canlı) | https://caspianx-web-q725.vercel.app/ · kod: [`web_app/`](web_app/) |
-| – | Təqdimat | [`presentation/CaspianX_Teqdimat.pdf`](presentation/CaspianX_Teqdimat.pdf) · [`.pptx`](presentation/CaspianX_Teqdimat.pptx) |
 
 PTA-nın əvvəlki versiyası arxivdədir: `results/archive/`.
 
