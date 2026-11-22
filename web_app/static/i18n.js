@@ -158,6 +158,7 @@ const AZ_RE = [
   [/^Open (.+) build-up$/, "$1 bərpasını aç"], [/^Show (.+) everywhere$/, "Hər yerdə $1 göstər"],
   [/^(Demo|Field data) loaded · (\d+) wells · (\d+) build-ups$/, (m, a, b, c) => `${a === "Demo" ? "Demo" : "Yataq datası"} yükləndi · ${b} quyu · ${c} bərpa`],
   [/^(Synthetic demo|Field data) · (\d+) well-days$/, (m, a, b) => `${a === "Field data" ? "Yataq datası" : "Sintetik demo"} · ${b} quyu-gün`],
+  [/^The files are larger than the hosting limit .*?START_CASPIANX\.bat \(no size limit\)\.( \((.+) MB\))?$/, (m, a, b) => `Fayllar onlayn versiyanın limitindən böyükdür (bir yükləmədə 4,5 MB)${b ? " — seçilən: " + b + " MB" : ""}. Faylları bir ZIP-ə yığın (adətən 5–10 dəfə kiçilir) və yenidən yükləyin, ya da tətbiqi noutbukda işə salın: START_CASPIANX.bat (ölçü limiti yoxdur).`],
   [/^Input check failed: these files contain no daily sensor data .*$/, "Yüklənən fayllarda gündəlik sensor datası yoxdur (daily_features: quyu, tarix, WHP, ştuser…). vfm_submission.csv və ya pta_submission.csv kimi nəticə faylları giriş kimi istifadə oluna bilməz."],
   [/^Input check failed: (.+)$/, "Giriş yoxlaması alınmadı: $1"],
   [/^Processing · (.+) · (.+) s$/, "Emal olunur · $1 · $2 s"], [/^Uploading (.+)$/, "Yüklənir $1"],

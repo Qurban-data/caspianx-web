@@ -187,13 +187,17 @@ async function waitJob(jid) {
     progress(100, `Processing · ${j.stage || "working"} · ${fmt(j.elapsed_s, 0)} s`);
   }
 }
+// Hosted serverless platforms cap one request body (Vercel: 4.5 MB). Large per-minute files go to the local app.
+const HOSTED = /\.vercel\.app$/.test(location.hostname);
+const TOO_BIG = "The files are larger than the hosting limit (4.5 MB per upload on this online version). Put the files in one ZIP (usually 5-10x smaller) and try again, or run the app on the laptop: START_CASPIANX.bat (no size limit).";
 function uploadXHR(files, quiet) {
   return new Promise((resolve, reject) => {
     const fd = new FormData(); let total = 0;
     Array.from(files).forEach((f) => { fd.append("files", f, f.name); total += f.size; });
+    if (HOSTED && total > 4.4e6) return reject(new Error(TOO_BIG + ` (${fmt(total / 1e6, 1)} MB)`));
     const x = new XMLHttpRequest(); x.open("POST", "/api/upload");
     x.upload.onprogress = (e) => { if (e.lengthComputable && !quiet) progress((e.loaded / e.total) * 100, `Uploading ${fmt(e.loaded / 1e6, 1)} / ${fmt(e.total / 1e6, 1)} MB`); };
-    x.onload = () => { let j; try { j = JSON.parse(x.responseText); } catch (e) { return reject(new Error(`HTTP ${x.status}: non-JSON response`)); }
+    x.onload = () => { let j; try { j = JSON.parse(x.responseText); } catch (e) { return reject(new Error(x.status === 413 ? TOO_BIG : `HTTP ${x.status}: non-JSON response`)); }
       if (x.status >= 400 || j.ok === false) return reject(new Error(j.error || j.detail || `HTTP ${x.status}`)); resolve(j); };
     x.onerror = () => reject(new Error(netError(new Error("network"))));
     if (!quiet) progress(0, `Uploading ${files.length} file(s) · ${fmt(total / 1e6, 1)} MB`);

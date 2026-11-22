@@ -6,3 +6,4 @@ outputs/
 *.zip
 data_autoload/
 web_app/preload/
+.venv_web/
