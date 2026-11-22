@@ -8,13 +8,14 @@ const C = { oil: "#f2a446", water: "#4f8ff0", gas: "#a8d8ff", red: "#e0503a", go
   bg: "#0d1314", bg2: "#0a1011", tech: "#76a8ff", sand: "#ffe2a3" };
 const PH = ["oil", "water", "gas"];
 const UNIT = { oil: "STB/d", water: "STB/d", gas: "Mscf/d" };
+const T = (s) => tr(s);
 const $ = (q) => document.querySelector(q);
 const $$ = (q) => Array.from(document.querySelectorAll(q));
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const isNum = (v) => v !== null && v !== undefined && v !== "" && Number.isFinite(Number(v));
 const fmt = (v, d = 0) => (isNum(v) ? Number(v).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }) : "N/A");
 const sgn = (v, d = 2) => (isNum(v) ? (v > 0 ? "+" : "") + fmt(v, d) : "N/A");
-const CFG = { displaylogo: false, responsive: true, modeBarButtonsToRemove: ["lasso2d", "select2d", "autoScale2d"] };
+const CFG = { get locale() { return I18N.lang === "az" ? "az" : "en-US"; }, displaylogo: false, responsive: true, modeBarButtonsToRemove: ["lasso2d", "select2d", "autoScale2d"] };
 const AX = (o = {}) => { const t = Object.assign({ font: { size: 12, color: C.muted } }, o.title || {});
   return Object.assign({ gridcolor: C.grid, zerolinecolor: C.grid, linecolor: C.line, tickfont: { family: "JetBrains Mono, monospace", size: 11, color: C.muted } }, o, { title: t }); };
 function lay(o = {}) {
@@ -50,11 +51,22 @@ function dayShapes(days, color, opacity = 0.2) {
   return (days || []).map((d) => ({ type: "rect", xref: "x", yref: "paper", x0: d + "T00:00", x1: d + "T23:59", y0: 0, y1: 1, fillcolor: color, opacity, line: { width: 0 }, layer: "below" }));
 }
 function xRange() {
-  if (S.range === "all" || !S.lastDay) return null;
-  const end = new Date(S.lastDay + "T23:59:00Z"); const start = new Date(end.getTime() - (+S.range) * 86400000);
-  const first = new Date(S.firstDay + "T00:00:00Z");
-  return [(start < first ? first : start).toISOString().slice(0, 10), S.lastDay + "T23:59"];
+  if (S.range === "all" || !S.lastDay) return null;         // S.range = "YYYY-MM": one calendar month
+  const [y, m] = S.range.split("-").map(Number); const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  return [`${S.range}-01`, `${S.range}-${String(last).padStart(2, "0")}T23:59`];
 }
+function monthsOfPeriod() {
+  const out = []; if (!S.firstDay) return out;
+  let [y, m] = S.firstDay.split("-").map(Number); const [y1, m1] = S.lastDay.split("-").map(Number);
+  while (y < y1 || (y === y1 && m <= m1)) { out.push(`${y}-${String(m).padStart(2, "0")}`); m++; if (m > 12) { m = 1; y++; } }
+  return out;
+}
+function buildRange() {
+  const ms = monthsOfPeriod(); if (S.range !== "all" && !ms.includes(S.range)) S.range = "all";
+  $("#rangeSeg").innerHTML = `<button data-r="all" class="${S.range === "all" ? "on" : ""}">Whole period</button>` +
+    ms.map((m) => `<button data-r="${m}" class="${S.range === m ? "on" : ""}" title="${monthLabel(m, true)}">${monthLabel(m)}</button>`).join("");
+}
+function setRange(r) { S.range = r; $$("#rangeSeg button").forEach((x) => x.classList.toggle("on", x.dataset.r === r)); if (S.sid) { rerangeAll(); monTableMark(); } }
 function applyRange(o) { const r = xRange(); if (r) { o.range = r; o.autorange = false; } else o.autorange = true; return o; }
 function syncZoom(id, others = []) {
   const g = document.getElementById(id);
@@ -72,7 +84,9 @@ function syncZoom(id, others = []) {
 
 // ------------------------------------------------------------------ data loading
 async function resync() {
-  const j = S.source.kind === "demo" ? await api("/api/demo", { method: "POST" }, true) : await uploadJob(S.source.files, true);
+  let j;
+  if (S.source.kind === "field") { const fd = new FormData(); fd.append("code", S.source.code); j = await api("/api/default", { method: "POST", body: fd }, true); }
+  else j = S.source.kind === "demo" ? await api("/api/demo", { method: "POST" }, true) : await uploadJob(S.source.files, true);
   S.sid = j.sid;
 }
 async function uploadJob(files, quiet) {
@@ -109,7 +123,21 @@ async function upload(files) {
   try { const keep = Array.from(files); const res = await uploadJob(keep); S.source = { kind: "files", files: keep }; await apply(res); }
   catch (e) { progress(null); progress(null, e.message, true); toast(e.message); }
 }
-async function demo() {
+async function loadField(code) {
+  const fd = new FormData(); fd.append("code", code || "");
+  const j = await api("/api/default", { method: "POST", body: fd }, true);
+  const box = $("#codeBox");
+  if (j.available) { box.classList.remove("show"); S.source = { kind: "field", code: code || "" }; $("#btnField").style.display = ""; progress(100, "Loading field data"); await apply(j); return true; }
+  box.classList.toggle("show", !!j.needs_code); box.classList.toggle("bad", !!j.wrong);
+  if (j.needs_code) progress(null, j.wrong ? "Wrong access code." : "Field data is protected: enter the access code.", !!j.wrong);
+  return false;
+}
+async function boot() {
+  try { if (await loadField("")) return; } catch (e) { /* fall through to the demo */ }
+  await demo(true);
+}
+async function demo(keepMsg) {
+  const msg = keepMsg === true ? $("#progTxt").textContent : "";
   try { progress(100, "Generating synthetic demo field"); const res = await api("/api/demo", { method: "POST" }); S.source = { kind: "demo" }; await apply(res); }
   catch (e) { progress(null, e.message, true); toast(e.message); }
 }
@@ -117,11 +145,11 @@ async function apply(j) {
   S.sid = j.sid; S.sum = j; S.wells = j.wells; S.well = j.wells[0]; S.ev = null; S.firstDay = j.period[0]; S.lastDay = j.period[1];
   $("#well").innerHTML = j.wells.map((w) => `<option>${esc(w)}</option>`).join(""); $("#well").disabled = false;
   $$("[data-exp]").forEach((b) => (b.disabled = false));
-  header();
+  header(); buildRange();
   const [m, p, it] = await Promise.all([S.model || api("/api/model"), api(`/api/pta?sid=${S.sid}`), api(`/api/interpret?sid=${S.sid}`)]);
   S.model = m; S.pta = p.events; S.interp = it;
   progress(null, `${j.dataset_kind === "DEMO" ? "Demo" : "Field data"} loaded · ${j.wells.length} wells · ${j.n_buildups} build-ups`);
-  await Promise.all([overview(), measurements(), vfm()]);
+  await Promise.all([overview(), measurements(), vfm(), monthly()]);
   pta();
 }
 function header() {
@@ -156,11 +184,11 @@ async function overview() {
   $$("#kpis .kpi").forEach((b) => b.addEventListener("click", () => { if (!field) return tab(b.dataset.go); if (b.dataset.go === "pta") return tab("pta"); tab("vfm"); }));
   $("#ovChartScope").textContent = field ? "· field total" : `· ${S.well}`;
   const tr = [
-    { x: v.dates, y: v.oil.rate, name: "Oil, STB/d", line: { color: C.oil, width: 2 }, hovertemplate: "%{y:,.0f} STB/d" },
-    { x: v.dates, y: v.water.rate, name: "Water, STB/d", line: { color: C.water, width: 1.8 }, hovertemplate: "%{y:,.0f} STB/d" },
-    { x: v.dates, y: v.gas.rate, name: "Gas, Mscf/d", yaxis: "y2", line: { color: C.gas, width: 1.8 }, hovertemplate: "%{y:,.0f} Mscf/d" }];
-  Plotly.react("ovChart", tr, lay({ yaxis: AX({ title: { text: "Oil · water, STB/d" }, rangemode: "tozero", domain: [0.4, 1] }),
-    yaxis2: AX({ title: { text: "Gas, Mscf/d" }, rangemode: "tozero", domain: [0, 0.32] }), xaxis: applyRange(AX({ type: "date", anchor: "y2" })),
+    { x: v.dates, y: v.oil.rate, name: T("Oil, STB/d"), line: { color: C.oil, width: 2 }, hovertemplate: "%{y:,.0f} STB/d" },
+    { x: v.dates, y: v.water.rate, name: T("Water, STB/d"), line: { color: C.water, width: 1.8 }, hovertemplate: "%{y:,.0f} STB/d" },
+    { x: v.dates, y: v.gas.rate, name: T("Gas, Mscf/d"), yaxis: "y2", line: { color: C.gas, width: 1.8 }, hovertemplate: "%{y:,.0f} Mscf/d" }];
+  Plotly.react("ovChart", tr, lay({ yaxis: AX({ title: { text: T("Oil · water, STB/d") }, rangemode: "tozero", domain: [0.4, 1] }),
+    yaxis2: AX({ title: { text: T("Gas, Mscf/d") }, rangemode: "tozero", domain: [0, 0.32] }), xaxis: applyRange(AX({ type: "date", anchor: "y2" })),
     margin: { l: 76, r: 20, t: 30, b: 44 }, shapes: field ? [] : dayShapes(v.shutin_days, C.red) }), CFG);
   queue(field);
 }
@@ -194,6 +222,72 @@ function queue(field) {
   }));
   const qf = $("#qField"); if (qf) qf.addEventListener("click", () => { S.scope = "field"; overview(); });
   const qj = $("#qJump"); if (qj) qj.addEventListener("click", () => { const first = S.pta.slice().sort((a, b) => (b.skin ?? -1e9) - (a.skin ?? -1e9))[0]; openEvent(first.id); });
+}
+
+// ------------------------------------------------------------------ monthly analysis
+const pct = (v, d = 1) => (isNum(v) ? (v > 0 ? "+" : "") + fmt(v, d) + " %" : "–");
+const cls = (v, inv) => (!isNum(v) || Math.abs(v) < 0.05 ? "" : ((v > 0) !== !!inv ? "up" : "down"));
+async function monthly() {
+  S.monScope = S.monScope || "field"; S.heat = S.heat || "oil";
+  const field = S.monScope === "field";
+  $$("#monSeg button").forEach((b) => b.classList.toggle("on", b.dataset.s === S.monScope));
+  $("#monScope").textContent = field ? `· ${S.wells.length} wells` : `· ${S.well}`;
+  $("#monBarScope").textContent = field ? "· field total" : `· ${S.well}`;
+  const m = await api(`/api/monthly?sid=${S.sid}&well=${encodeURIComponent(field ? "ALL" : S.well)}`);
+  S.mon = m; const R = m.months;
+  $("#monPeriod").textContent = R.length ? `${monthLabel(R[0].month, true)} → ${monthLabel(R[R.length - 1].month, true)} · ${m.cumulative.days} ${T("Days").toLowerCase()}` : "";
+  const best = R.slice().sort((a, b) => b.oil_avg - a.oil_avg)[0];
+  const drop = R.filter((r) => isNum(r.oil_avg_mom_pct)).sort((a, b) => a.oil_avg_mom_pct - b.oil_avg_mom_pct)[0];
+  const span = R.length > 1 ? (R[R.length - 1].oil_avg / R[0].oil_avg - 1) * 100 : null;
+  const k = [["oil", "Cumulative oil", fmt(m.cumulative.oil_stb), "STB"], ["water", "Cumulative water", fmt(m.cumulative.water_stb), "STB"],
+    ["gas", "Cumulative gas", fmt(m.cumulative.gas_mscf), "Mscf"],
+    ["teal", "Best month · oil", best ? monthLabel(best.month, true) : "–", best ? `${fmt(best.oil_avg)} STB/d` : ""],
+    ["red", "Largest monthly drop · oil", drop ? monthLabel(drop.month, true) : "–", drop ? pct(drop.oil_avg_mom_pct, 2) : ""],
+    ["gold", "First → last month · oil", pct(span, 1), R.length > 1 ? `${fmt(R[0].oil_avg)} → ${fmt(R[R.length - 1].oil_avg)} STB/d` : ""]];
+  $("#monKpis").innerHTML = k.map(([c, l, v, u]) => `<div class="kpi"><div class="label"><span class="dot" style="background:var(--${c})"></span>${l}</div>
+    <div class="v ${["oil", "water", "gas"].includes(c) ? "c-" + c : ""}">${v}</div><div class="u">${u}</div></div>`).join("");
+  const x = R.map((r) => monthLabel(r.month));
+  const bar = (ph, name, unit, ax) => ({ type: "bar", x, y: R.map((r) => r[ph + "_avg"]), name, yaxis: ax, marker: { color: C[ph] },
+    text: R.map((r) => (isNum(r[ph + "_avg_mom_pct"]) ? pct(r[ph + "_avg_mom_pct"]) : "")), textposition: "outside", cliponaxis: false,
+    textfont: { family: "JetBrains Mono", size: 10.5, color: C.muted }, hovertemplate: `%{y:,.0f} ${unit}<extra>${name}</extra>` });
+  Plotly.react("monBars", [bar("oil", T("Oil, STB/d"), "STB/d", "y"), bar("water", T("Water, STB/d"), "STB/d", "y"), bar("gas", T("Gas, Mscf/d"), "Mscf/d", "y2"),
+    { x, y: R.map((r) => r.wc_pct), name: T("Water cut, %"), yaxis: "y3", mode: "lines+markers", line: { color: C.teal2, width: 2 }, hovertemplate: "%{y:.1f} %<extra></extra>" }],
+    lay({ barmode: "group", bargap: 0.22, hovermode: "x unified", margin: { l: 76, r: 64, t: 34, b: 40 },
+      xaxis: AX({ type: "category" }), yaxis: AX({ title: { text: T("Oil, STB/d") + " · " + T("Water, STB/d") }, rangemode: "tozero", domain: [0.42, 1] }),
+      yaxis2: AX({ title: { text: T("Gas, Mscf/d") }, rangemode: "tozero", domain: [0, 0.32] }),
+      yaxis3: AX({ title: { text: T("Water cut, %") }, overlaying: "y", side: "right", showgrid: false, rangemode: "tozero" }) }), CFG);
+  const cols = [["Month", (r) => `<b>${monthLabel(r.month, true)}</b>`, "t"], ["Days", (r) => r.days, "n"],
+    ["Oil, STB/d", (r) => fmt(r.oil_avg), "n c-oil"], ["vs prev", (r) => pct(r.oil_avg_mom_pct, 2), (r) => "n " + cls(r.oil_avg_mom_pct)], ["vs avg", (r) => pct(r.oil_avg_vs_mean_pct), (r) => "n " + cls(r.oil_avg_vs_mean_pct)],
+    ["Water, STB/d", (r) => fmt(r.water_avg), "n c-water"], ["vs prev", (r) => pct(r.water_avg_mom_pct, 2), (r) => "n " + cls(r.water_avg_mom_pct, true)],
+    ["Gas, Mscf/d", (r) => fmt(r.gas_avg), "n c-gas"], ["vs prev", (r) => pct(r.gas_avg_mom_pct, 2), (r) => "n " + cls(r.gas_avg_mom_pct)],
+    ["Water cut, %", (r) => fmt(r.wc_pct, 1), "n"], ["GOR, scf/STB", (r) => fmt(r.gor), "n"], ["Uptime, %", (r) => fmt(r.uptime_pct, 2), "n"],
+    ["Shut-in well-days", (r) => r.shutin_well_days, "n"], ["Oil total, STB", (r) => fmt(r.oil_stb), "n"]];
+  $("#monTable").innerHTML = `<tr>${cols.map(([h, , c]) => `<th class="${typeof c === "string" ? c.split(" ")[0] : "n"}">${h}</th>`).join("")}</tr>` +
+    R.map((r) => `<tr class="click" data-m="${r.month}">${cols.map(([, f, c]) => `<td class="${typeof c === "function" ? c(r) : c}">${f(r)}</td>`).join("")}</tr>`).join("");
+  $$("#monTable tr.click").forEach((trw) => trw.addEventListener("click", () => setRange(S.range === trw.dataset.m ? "all" : trw.dataset.m)));
+  monTableMark(); drawHeat(); drawSurface();
+}
+function monTableMark() { $$("#monTable tr.click").forEach((r) => r.classList.toggle("sel", r.dataset.m === S.range)); }
+function drawHeat() {
+  const M = S.mon && S.mon.matrix; if (!M) return;
+  const chg = S.heat === "chg"; const src = M[chg ? "oil" : S.heat];
+  const z = chg ? src.map((row) => row.map((v, i) => (i && isNum(v) && row[i - 1] ? (v / row[i - 1] - 1) * 100 : null))) : src;
+  const unit = chg ? "%" : UNIT[S.heat];
+  Plotly.react("monHeat", [{ type: "heatmap", x: M.months.map((m) => monthLabel(m)), y: M.wells, z, xgap: 2, ygap: 2,
+    colorscale: chg ? [[0, "#e0503a"], [0.5, "#111a1c"], [1, "#4fbf8a"]] : [[0, "#0d1314"], [1, C[S.heat]]], zmid: chg ? 0 : undefined,
+    text: z.map((r) => r.map((v) => (isNum(v) ? (chg ? sgn(v, 1) : fmt(v)) : ""))), texttemplate: "%{text}", textfont: { family: "JetBrains Mono", size: 10.5 },
+    hovertemplate: `%{y} · %{x}<br>%{z:,.1f} ${unit}<extra></extra>`, colorbar: { thickness: 10, tickfont: { color: C.muted, size: 10 }, outlinewidth: 0 } }],
+    lay({ hovermode: "closest", showlegend: false, margin: { l: 64, r: 10, t: 12, b: 36 }, xaxis: AX({ type: "category" }), yaxis: AX({ type: "category", autorange: "reversed" }) }), CFG);
+}
+function drawSurface() {
+  const Sf = S.mon && S.mon.surface; if (!Sf) return;
+  const ax = (t) => ({ title: { text: t, font: { size: 11, color: C.muted } }, gridcolor: "rgba(255,255,255,0.12)", backgroundcolor: C.bg, showbackground: true,
+    tickfont: { family: "JetBrains Mono", size: 10, color: C.muted }, zerolinecolor: C.line });
+  Plotly.react("monSurf", [{ type: "surface", x: Sf.dates, y: Sf.wells, z: Sf.oil, colorscale: [[0, "#0d1314"], [0.5, "#8a5a22"], [1, C.oil]], showscale: false,
+    contours: { z: { show: true, usecolormap: true, project: { z: true }, width: 1 } }, hovertemplate: `%{y} · %{x}<br>%{z:,.0f} STB/d<extra></extra>` }],
+    { paper_bgcolor: C.bg, font: { family: "Archivo, Inter, sans-serif", color: C.ink, size: 11 }, margin: { l: 0, r: 0, t: 0, b: 0 },
+      scene: { xaxis: Object.assign(ax(""), { type: "date" }), yaxis: Object.assign(ax(T("Well")), { type: "category" }), zaxis: ax(T("Oil, STB/d")),
+        camera: { eye: { x: -1.55, y: -1.6, z: 0.85 } }, aspectratio: { x: 1.7, y: 1, z: 0.7 } } }, CFG);
 }
 
 // ------------------------------------------------------------------ 02 measurements
@@ -399,6 +493,7 @@ function setWell(w, redrawPta = true) {
   S.well = w; $("#well").value = w;
   const own = S.pta.filter((e) => e.well === w); if (own.length) S.ev = own[0].id;
   const p = [measurements(), vfm()]; if (S.scope === "well") p.push(overview()); else queue(true);
+  if (S.monScope === "well") p.push(monthly());
   Promise.all(p).catch((e) => toast(e.message));
   if (redrawPta) pta();
 }
@@ -409,10 +504,16 @@ $$(".tabs button").forEach((b) => b.addEventListener("click", () => tab(b.datase
 $("#well").addEventListener("change", (e) => setWell(e.target.value));
 $("#evSel").addEventListener("change", (e) => { S.ev = +e.target.value; drawEvent(); });
 $$("#ovSeg button").forEach((b) => b.addEventListener("click", () => { if (!S.sid) return; S.scope = b.dataset.s; overview().catch((e) => toast(e.message)); }));
-$$("#rangeSeg button").forEach((b) => b.addEventListener("click", () => { S.range = b.dataset.r; $$("#rangeSeg button").forEach((x) => x.classList.toggle("on", x === b)); if (S.sid) rerangeAll(); }));
+$("#rangeSeg").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) setRange(b.dataset.r); });
+$$("#monSeg button").forEach((b) => b.addEventListener("click", () => { if (!S.sid) return; S.monScope = b.dataset.s; monthly().catch((e) => toast(e.message)); }));
+$$("#heatSeg button").forEach((b) => b.addEventListener("click", () => { S.heat = b.dataset.p; $$("#heatSeg button").forEach((x) => x.classList.toggle("on", x === b)); drawHeat(); }));
+$$("#langSeg button").forEach((b) => b.addEventListener("click", () => setLang(b.dataset.lang)));
+$("#btnCode").addEventListener("click", () => loadField($("#code").value).catch((e) => toast(e.message)));
+$("#code").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#btnCode").click(); });
+$("#btnField").addEventListener("click", () => loadField(S.fieldCode || (S.source && S.source.code) || "").catch((e) => toast(e.message)));
 $$("#vfmLayers .chip").forEach((c) => c.addEventListener("click", () => { if (c.disabled) return; S.layers[c.dataset.l] = !S.layers[c.dataset.l]; c.classList.toggle("on", S.layers[c.dataset.l]); drawVfm(); }));
 $$("[data-ml]").forEach((c) => c.addEventListener("click", () => { S.mlayers[c.dataset.ml] = !S.mlayers[c.dataset.ml]; c.classList.toggle("on", S.mlayers[c.dataset.ml]); if (S.sid) measurements(); }));
-$("#btnDemo").addEventListener("click", demo);
+$("#btnDemo").addEventListener("click", () => demo());
 $("#file").addEventListener("change", (e) => { upload(e.target.files); e.target.value = ""; });
 const drop = $("#drop");
 ["dragenter", "dragover"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); }));
@@ -434,4 +535,12 @@ window.addEventListener("load", () => setTimeout(() => {}, 0));
 const _react = Plotly.react;
 Plotly.react = function (id, ...rest) { const r = _react.call(Plotly, id, ...rest); const g = typeof id === "string" ? document.getElementById(id) : id;
   if (g && ["ovChart", "measChart", "vfmChart"].includes(g.id)) Promise.resolve(r).then(() => syncZoom(g.id, ["ovChart", "measChart", "vfmChart"].filter((x) => x !== g.id))); return r; };
+function setLang(l) {
+  I18N.lang = l; try { localStorage.setItem("cx_lang", l); } catch (e) { /* storage unavailable */ }
+  $$("#langSeg button").forEach((x) => x.classList.toggle("on", x.dataset.lang === l));
+  trAll();
+  if (S.sid) { buildRange(); Promise.all([overview(), measurements(), vfm(), monthly()]).then(() => pta()).catch((e) => toast(e.message)); }
+}
+$$("#langSeg button").forEach((x) => x.classList.toggle("on", x.dataset.lang === I18N.lang)); trAll();
+boot();
 api("/api/health").then((h) => { if (!h.model_loaded) toast("Model file missing: web_app/models/vfm_model_FINAL.pkl"); }).catch((e) => toast(e.message));

@@ -11,6 +11,8 @@ import base64
 import shutil
 import tempfile
 import zipfile
+import hashlib
+import hmac
 import html
 import io
 import json
@@ -27,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Form, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
@@ -55,7 +57,50 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)   # plotly.min.js 4.8 MB -
 
 _MODEL = None
 _LOCK = threading.Lock()
+_DEF_LOCK = threading.Lock()
 SESSIONS: "OrderedDict[str, dict]" = OrderedDict()
+
+
+PRELOAD = BASE / "preload" / "field_session.pkl"   # built by tools/build_preload.py (derived results, no per-minute data)
+ACCESS_CODE = os.environ.get("CASPIANX_ACCESS_CODE", "")
+PUBLIC_HOST = bool(os.environ.get("VERCEL"))
+
+
+def _default_sid(code: str) -> str:
+    """Session id of the bundled field results. It is derived from the access code, so it cannot be guessed without it
+    and is the same on every server instance."""
+    return "f" + hashlib.sha256(("caspianx:" + code).encode()).hexdigest()[:30]
+
+
+def _local_folder():
+    """Local field folder loaded at start on an engineer's own machine (never on a public host): CASPIANX_DATA_DIR,
+    or <repo>/data_autoload, or <repo>/data/socar."""
+    if PUBLIC_HOST:
+        return None
+    for c in (os.environ.get("CASPIANX_DATA_DIR"), BASE.parent / "data_autoload", BASE.parent / "data" / "socar"):
+        if c and Path(c).is_dir() and any(Path(c).glob("*.csv")):
+            return Path(c)
+    return None
+
+
+def _load_default(sid: str | None = None):
+    key = _default_sid(ACCESS_CODE)
+    if sid is not None and sid != key:
+        return None
+    if key in SESSIONS:
+        return SESSIONS[key]
+    with _DEF_LOCK:
+        if key in SESSIONS:
+            return SESSIONS[key]
+        try:
+            if PRELOAD.exists() and not (PUBLIC_HOST and not ACCESS_CODE):
+                SESSIONS[key] = pickle.loads(PRELOAD.read_bytes())
+            elif _local_folder() is not None:
+                j = run_pipeline(AP.files_from_path(_local_folder()), f"field data (local folder {_local_folder().name})")
+                SESSIONS[key] = SESSIONS.pop(j["sid"])
+        except Exception:
+            traceback.print_exc()
+    return SESSIONS.get(key)
 
 
 def model():
@@ -91,7 +136,7 @@ def ok(payload: dict) -> JSONResponse:
 
 
 def session(sid: str) -> dict:
-    s = SESSIONS.get(sid)
+    s = SESSIONS.get(sid) or _load_default(sid)
     if s is None:
         raise HTTPException(404, "Session not found or expired: load data again (Upload or Load demo).")
     SESSIONS.move_to_end(sid)
@@ -127,7 +172,8 @@ def run_pipeline(files: list, source: str, progress=None, work_dir: str | None =
     with _LOCK:
         SESSIONS[sid] = {"I": I, "R": R, "source": source, "t": time.time(), "dir": work_dir}
         while len(SESSIONS) > MAX_SESSIONS:
-            _evict(*SESSIONS.popitem(last=False))
+            old = next(k for k in SESSIONS if k != _default_sid(ACCESS_CODE))   # bundled field session is never evicted
+            _evict(old, SESSIONS.pop(old))
     return {"sid": sid, **summary(SESSIONS[sid])}
 
 
@@ -385,6 +431,67 @@ def job(jid: str):
 @app.post("/api/demo")
 def demo():
     return ok(run_pipeline(demo_data.build(model()), "synthetic demo field (not field data)"))
+
+
+@app.post("/api/default")
+def default_dataset(code: str = Form("")):
+    """Field results bundled with the app. With CASPIANX_ACCESS_CODE set, the code must be supplied."""
+    has = (PRELOAD.exists() and not (PUBLIC_HOST and not ACCESS_CODE)) or _local_folder() is not None
+    if not has:
+        return ok({"available": False, "needs_code": False})
+    if ACCESS_CODE and not hmac.compare_digest(code.strip().encode(), ACCESS_CODE.encode()):
+        time.sleep(0.4)
+        return ok({"available": False, "needs_code": True, "wrong": bool(code.strip())})
+    d = _load_default()
+    if d is None:
+        return ok({"available": False, "needs_code": False})
+    return ok({"available": True, "sid": _default_sid(ACCESS_CODE), **summary(d)})
+
+
+@app.get("/api/monthly")
+def monthly(sid: str, well: str = Query("ALL")):
+    """Calendar-month aggregation of the submitted daily rates, month-over-month change, well x month matrix and the
+    well x day oil surface. Everything is computed from the session's daily table."""
+    s = session(sid)
+    V = s["R"]["Bl"].assign(date=lambda d: pd.to_datetime(d.date))
+    U = s["R"]["P"].assign(date=lambda d: pd.to_datetime(d.date))[["well_name", "date", "uptime"]]
+    V = V.merge(U, on=["well_name", "date"], how="left")
+    wells = sorted(V.well_name.unique())
+    if well != "ALL":
+        if well not in wells:
+            raise HTTPException(404, f"Well {well} not in the loaded data.")
+        F = V[V.well_name == well]
+    else:
+        F = V
+    F = F.assign(month=F.date.dt.to_period("M").astype(str))
+    rows = []
+    for m, g in F.groupby("month"):
+        days = g.date.nunique()
+        o, w, gs = (float(g[RATES[ph]].sum()) for ph in PH)
+        rows.append({"month": m, "days": int(days), "days_in_month": int(pd.Period(m).days_in_month),
+                     "oil_stb": o, "water_stb": w, "gas_mscf": gs,
+                     "oil_avg": o / days, "water_avg": w / days, "gas_avg": gs / days,
+                     "wc_pct": w / (o + w) * 100 if o + w > 0 else None, "gor": gs * 1000 / o if o > 0 else None,
+                     "uptime_pct": float(g.uptime.mean() * 100), "shutin_well_days": int((g.uptime <= 0).sum())})
+    for i, r in enumerate(rows):
+        for k in ("oil_avg", "water_avg", "gas_avg"):
+            prev = rows[i - 1][k] if i else None
+            r[k + "_mom_pct"] = (r[k] / prev - 1) * 100 if prev else None
+        for k in ("wc_pct", "gor", "uptime_pct"):
+            prev = rows[i - 1][k] if i else None
+            r[k + "_mom"] = r[k] - prev if (prev is not None and r[k] is not None) else None
+    mean_all = {k: float(np.mean([r[k] for r in rows])) for k in ("oil_avg", "water_avg", "gas_avg")} if rows else {}
+    for r in rows:
+        for k, v in mean_all.items():
+            r[k + "_vs_mean_pct"] = (r[k] / v - 1) * 100 if v else None
+    Vm = V.assign(month=V.date.dt.to_period("M").astype(str))
+    piv = {ph: Vm.pivot_table(index="well_name", columns="month", values=RATES[ph], aggfunc="mean").reindex(wells) for ph in PH}
+    daily = V.pivot_table(index="well_name", columns="date", values=RATES["oil"], aggfunc="sum").reindex(wells)
+    return ok({"well": well, "months": rows,
+               "matrix": {"wells": wells, "months": list(piv["oil"].columns), **{ph: piv[ph].round(1).values for ph in PH}},
+               "surface": {"wells": wells, "dates": [d.strftime("%Y-%m-%d") for d in daily.columns], "oil": daily.round(1).values},
+               "cumulative": {"oil_stb": float(F[RATES["oil"]].sum()), "water_stb": float(F[RATES["water"]].sum()),
+                              "gas_mscf": float(F[RATES["gas"]].sum()), "days": int(F.date.nunique())}})
 
 
 @app.get("/api/summary")

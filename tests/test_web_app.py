@@ -130,3 +130,12 @@ def test_large_per_minute_file_is_streamed():
     if j["state"] == "error":   # without the static well files the input check must explain what is missing
         assert "Input check failed" in j["error"] or "Processing failed" in j["error"]
 
+
+def test_monthly_analysis_is_consistent_with_daily_rates():
+    j = _check(client.post("/api/demo"))
+    m = _check(client.get(f"/api/monthly?sid={j['sid']}"))
+    v = _check(client.get(f"/api/vfm?sid={j['sid']}&well=ALL"))
+    assert abs(sum(r["oil_stb"] for r in m["months"]) - sum(v["oil"]["rate"])) < 1.0
+    assert m["months"][0]["oil_avg_mom_pct"] is None and all(r["days"] > 0 for r in m["months"])
+    assert len(m["surface"]["oil"]) == len(j["wells"]) and len(m["matrix"]["months"]) == len(m["months"])
+    assert client.get("/api/vfm?sid=field&well=ALL").status_code == 404        # field results are not reachable by a guessable id

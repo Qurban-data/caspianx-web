@@ -19,6 +19,7 @@
   <div class="top-right">
     <span id="dsPill" class="pill">No dataset loaded</span>
     <span id="dsBadge" class="badge none">NO DATA</span>
+    <div class="seg" id="langSeg"><button data-lang="az" class="on">AZ</button><button data-lang="en">EN</button></div>
     <button id="btnNotes" class="btn-notes" title="Engineering notes and input check">Notes <span id="notesCnt" class="cnt zero">0</span></button>
   </div>
 </header>
@@ -33,6 +34,8 @@
       </label>
       <div class="prog" id="prog"><i></i></div>
       <div class="progtxt" id="progTxt"></div>
+      <div id="codeBox" class="codebox"><input id="code" type="password" placeholder="Access code" autocomplete="off"><button id="btnCode" class="btn">Open field data</button></div>
+      <button id="btnField" class="btn mt8" style="display:none">Field data</button>
       <button id="btnDemo" class="btn mt8">Load demo data</button>
     </section>
     <section>
@@ -55,12 +58,13 @@
     <div class="tabsbar">
       <nav class="tabs">
         <button data-tab="ov" class="on"><span class="step">01</span>Overview</button>
-        <button data-tab="meas"><span class="step">02</span>Measurements</button>
-        <button data-tab="vfm"><span class="step">03</span>VFM &amp; Predictions</button>
-        <button data-tab="pta"><span class="step">04</span>PTA &amp; Reservoir</button>
+        <button data-tab="mon"><span class="step">02</span>Monthly analysis</button>
+        <button data-tab="meas"><span class="step">03</span>Measurements</button>
+        <button data-tab="vfm"><span class="step">04</span>VFM &amp; Predictions</button>
+        <button data-tab="pta"><span class="step">05</span>PTA &amp; Reservoir</button>
       </nav>
-      <div class="tools"><span class="label">Range</span>
-        <div class="seg" id="rangeSeg"><button data-r="30">30D</button><button data-r="60">60D</button><button data-r="90">90D</button><button data-r="all" class="on">All</button></div>
+      <div class="tools"><span class="label">Period</span>
+        <div class="seg months" id="rangeSeg"><button data-r="all" class="on">Whole period</button></div>
       </div>
     </div>
 
@@ -76,6 +80,26 @@
           <div id="ovChart" class="chart" style="height:520px"></div></div>
         <div class="panel"><div class="hd"><h3>Findings &amp; action queue</h3><span class="label" id="qCount"></span></div>
           <div id="queue" class="queue"><div class="na">No dataset loaded.</div></div></div>
+      </div>
+    </section>
+
+    <section id="tab-mon" class="tab">
+      <div class="context">
+        <div><h1>Monthly analysis <span id="monScope"></span></h1>
+          <div class="sub">Every calendar month of the loaded period compared with the previous month and with the period average · <span id="monPeriod"></span></div></div>
+        <div class="seg" id="monSeg"><button data-s="field" class="on">Field</button><button data-s="well">Well</button></div>
+      </div>
+      <div class="kpis" id="monKpis"></div>
+      <div class="panel"><div class="hd"><h3>Average daily rate by month <span class="sc" id="monBarScope"></span></h3><span class="label">label = change vs previous month</span></div>
+        <div id="monBars" class="chart" style="height:440px"></div></div>
+      <div class="panel"><div class="hd"><h3>Month-by-month comparison</h3><span class="label">click a month to zoom every chart</span></div>
+        <div class="tablewrap"><table id="monTable"></table></div></div>
+      <div class="mon-grid">
+        <div class="panel"><div class="hd"><h3>Well × month</h3>
+          <div class="seg" id="heatSeg"><button data-p="oil" class="on">Oil</button><button data-p="water">Water</button><button data-p="gas">Gas</button><button data-p="chg">Change %</button></div></div>
+          <div id="monHeat" class="chart" style="height:460px"></div></div>
+        <div class="panel"><div class="hd"><h3>3D production surface</h3><span class="label">well × day × oil rate · drag to rotate</span></div>
+          <div id="monSurf" class="chart" style="height:460px"></div></div>
       </div>
     </section>
 
@@ -125,6 +149,7 @@
   <div class="bd" id="drawerBody"></div>
 </aside>
 <div class="toast" id="toast"></div>
+<script src="/static/i18n.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

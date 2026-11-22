@@ -174,3 +174,13 @@ tr.sel td{background:var(--tealbg)}
 @media(max-width:1180px){.ov-grid,.pta-low{grid-template-columns:1fr}.mgrid{grid-template-columns:1fr}}
 @media(max-width:860px){.layout{grid-template-columns:1fr}.rail{position:static;height:auto}.tabsbar{top:0;position:static}.pgrid{grid-template-columns:1fr}.top{flex-wrap:wrap}.kpis,.sig{grid-template-columns:repeat(2,minmax(0,1fr))}.metrics{grid-template-columns:1fr}}
 main,.tab,.panel,.tablewrap{min-width:0}.tablewrap{max-width:100%}
+
+.mon-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px}
+@media(max-width:1180px){.mon-grid{grid-template-columns:minmax(0,1fr)}}
+.seg.months{flex-wrap:wrap;border-radius:14px}.seg.months button{padding:5px 10px}
+.codebox{display:none;margin-top:8px;gap:6px;flex-direction:column}.codebox.show{display:flex}
+.codebox input{background:var(--s1);border:1px solid var(--line2);border-radius:999px;padding:7px 12px;color:var(--ink);font-size:13px;min-width:0}
+.codebox.bad input{border-color:#e0503a}
+td.up{color:#7fd6a0}td.down{color:#ff9a8a}
+#monTable tr.click.sel td{background:var(--tealbg)}
+#langSeg button{padding:4px 9px;font-size:11.5px}
